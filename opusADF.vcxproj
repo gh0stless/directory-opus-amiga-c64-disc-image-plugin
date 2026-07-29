@@ -29,26 +29,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -90,6 +90,8 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>..\firy\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -103,9 +105,10 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;LITT_ENDIAN;DOPUS_PLUGIN_HELPER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;DOPUS_PLUGIN_HELPER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>ADFlib\src\win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>..\firy\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -122,10 +125,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>..\firy\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
@@ -138,69 +143,68 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;LITT_ENDIAN;DOPUS_PLUGIN_HELPER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;OPUSADF_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;DOPUS_PLUGIN_HELPER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>ADFlib\src\win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>..\firy\source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="ADFlib\src\adflib.h" />
-    <ClInclude Include="ADFlib\src\adf_bitm.h" />
-    <ClInclude Include="ADFlib\src\adf_blk.h" />
-    <ClInclude Include="ADFlib\src\adf_cache.h" />
-    <ClInclude Include="ADFlib\src\adf_defs.h" />
-    <ClInclude Include="ADFlib\src\adf_dir.h" />
-    <ClInclude Include="ADFlib\src\adf_disk.h" />
-    <ClInclude Include="ADFlib\src\adf_dump.h" />
-    <ClInclude Include="ADFlib\src\adf_env.h" />
-    <ClInclude Include="ADFlib\src\adf_err.h" />
-    <ClInclude Include="ADFlib\src\adf_file.h" />
-    <ClInclude Include="ADFlib\src\adf_hd.h" />
-    <ClInclude Include="ADFlib\src\adf_link.h" />
-    <ClInclude Include="ADFlib\src\adf_raw.h" />
-    <ClInclude Include="ADFlib\src\adf_salv.h" />
-    <ClInclude Include="ADFlib\src\adf_str.h" />
-    <ClInclude Include="ADFlib\src\adf_util.h" />
-    <ClInclude Include="ADFlib\src\defendian.h" />
-    <ClInclude Include="ADFlib\src\hd_blk.h" />
-    <ClInclude Include="ADFlib\src\win32\adf_nativ.h" />
-    <ClInclude Include="ADFlib\src\win32\defendian.h" />
-    <ClInclude Include="ADFlib\src\win32\nt4_dev.h" />
+    <ClInclude Include="..\firy\source\access\access.hpp" />
+    <ClInclude Include="..\firy\source\access\accessunit.hpp" />
+    <ClInclude Include="..\firy\source\access\blocks.hpp" />
+    <ClInclude Include="..\firy\source\access\tracks.hpp" />
+    <ClInclude Include="..\firy\source\buffer.hpp" />
+    <ClInclude Include="..\firy\source\console.hpp" />
+    <ClInclude Include="..\firy\source\filesystem\directory.hpp" />
+    <ClInclude Include="..\firy\source\filesystem\file.hpp" />
+    <ClInclude Include="..\firy\source\filesystem\filesystem.hpp" />
+    <ClInclude Include="..\firy\source\filesystem\node.hpp" />
+    <ClInclude Include="..\firy\source\firy.hpp" />
+    <ClInclude Include="..\firy\source\helpers\datetime.hpp" />
+    <ClInclude Include="..\firy\source\helpers\dirty.hpp" />
+    <ClInclude Include="..\firy\source\images\adf.hpp" />
+    <ClInclude Include="..\firy\source\images\d64.hpp" />
+    <ClInclude Include="..\firy\source\images\fat.hpp" />
+    <ClInclude Include="..\firy\source\images\image.hpp" />
+    <ClInclude Include="..\firy\source\images\iso9660.hpp" />
+    <ClInclude Include="..\firy\source\options.hpp" />
+    <ClInclude Include="..\firy\source\resources.hpp" />
+    <ClInclude Include="..\firy\source\sources\source.hpp" />
+    <ClInclude Include="..\firy\source\sources\sourcefile.hpp" />
     <ClInclude Include="headers\plugin support.h" />
     <ClInclude Include="headers\vfs plugins.h" />
     <ClInclude Include="headers\viewer plugins.h" />
     <ClInclude Include="opusADF.hpp" />
     <ClInclude Include="stdafx.h" />
-    <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="ADFlib\src\adf_bitm.c" />
-    <ClCompile Include="ADFlib\src\adf_cache.c" />
-    <ClCompile Include="ADFlib\src\adf_dir.c" />
-    <ClCompile Include="ADFlib\src\adf_disk.c" />
-    <ClCompile Include="ADFlib\src\adf_dump.c" />
-    <ClCompile Include="ADFlib\src\adf_env.c" />
-    <ClCompile Include="ADFlib\src\adf_file.c" />
-    <ClCompile Include="ADFlib\src\adf_hd.c" />
-    <ClCompile Include="ADFlib\src\adf_link.c" />
-    <ClCompile Include="ADFlib\src\adf_raw.c" />
-    <ClCompile Include="ADFlib\src\adf_salv.c" />
-    <ClCompile Include="ADFlib\src\adf_util.c" />
-    <ClCompile Include="ADFlib\src\win32\adf_nativ.c" />
-    <ClCompile Include="ADFlib\src\win32\nt4_dev.c" />
+    <ClCompile Include="..\firy\source\access\blocks.cpp" />
+    <ClCompile Include="..\firy\source\access\tracks.cpp" />
+    <ClCompile Include="..\firy\source\buffer.cpp" />
+    <ClCompile Include="..\firy\source\console.cpp" />
+    <ClCompile Include="..\firy\source\filesystem\filesystem.cpp" />
+    <ClCompile Include="..\firy\source\firy.cpp" />
+    <ClCompile Include="..\firy\source\images\adf.cpp" />
+    <ClCompile Include="..\firy\source\images\d64.cpp" />
+    <ClCompile Include="..\firy\source\images\fat.cpp" />
+    <ClCompile Include="..\firy\source\images\image.cpp" />
+    <ClCompile Include="..\firy\source\images\iso9660.cpp" />
+    <ClCompile Include="..\firy\source\options.cpp" />
+    <ClCompile Include="..\firy\source\resources.cpp" />
+    <ClCompile Include="..\firy\source\sources\source.cpp" />
+    <ClCompile Include="..\firy\source\sources\sourcefile.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="opusADF.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

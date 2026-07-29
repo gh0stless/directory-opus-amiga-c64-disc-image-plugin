@@ -1,11 +1,12 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "stdafx.h"
 
-// 8040a29e-0754-4ed7-a532-3688e08fff41
-static const GUID GUIDPlugin_ADF = { 0x8040a29e, 0x0754, 0x4ed7,{ 0xa5, 0x32, 0x36, 0x88, 0xe0, 0x8f,0xff, 0x41 } };
+// cfba0e55-5d15-446a-965b-ebf03145b000
+static const GUID GUIDPlugin_Firy = { 0xcfba0e55, 0x5d15, 0x446a,{ 0x96, 0x5b, 0xeb, 0xf0, 0x31, 0x45, 0xb0, 0x00 } };
 
 HINSTANCE g_hModuleInstance = 0;
 
+extern std::wstring s2ws(const std::string& str);
 
 extern "C"
 {
@@ -30,7 +31,6 @@ extern "C"
     __declspec(dllexport) bool VFS_FindNextFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFind, LPWIN32_FIND_DATA lpwfdData);
     __declspec(dllexport) void VFS_FindClose(HANDLE hData, HANDLE hFind);
 
-
     __declspec(dllexport) bool VFS_USBSafe(LPOPUSUSBSAFEDATA pUSBSafeData);
     __declspec(dllexport) bool VFS_Init(LPVFSINITDATA pInitData);
     __declspec(dllexport) void VFS_Uninit();
@@ -44,26 +44,32 @@ extern "C" int WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) {
 
 // Initialise plugin
 bool VFS_Init(LPVFSINITDATA pInitData) {
-
-    adfEnvInitDefault();
+    // firy's globals (gFiry/gResources/...) are constructed via static init,
+    // nothing else to set up.
     return true;
 }
 
 void VFS_Uninit() {
-    adfEnvCleanUp();
 }
 
 bool VFS_IdentifyW(LPVFSPLUGININFOW lpVFSInfo) {
     // Initialise plugin information
-    lpVFSInfo->idPlugin = GUIDPlugin_ADF;
+    lpVFSInfo->idPlugin = GUIDPlugin_Firy;
     lpVFSInfo->dwFlags = VFSF_CANCONFIGURE | VFSF_NONREENTRANT;
-    lpVFSInfo->dwCapabilities = VFSCAPABILITY_CASESENSITIVE | VFSCAPABILITY_POSTCOPYREREAD | VFSCAPABILITY_READONLY;
+    lpVFSInfo->dwCapabilities = VFSCAPABILITY_CASESENSITIVE | VFSCAPABILITY_POSTCOPYREREAD;
 
-    StringCchCopyW(lpVFSInfo->lpszHandleExts, lpVFSInfo->cchHandleExtsMax, L".adf;.hdf");
-    StringCchCopyW(lpVFSInfo->lpszName, lpVFSInfo->cchNameMax, L"Amiga ADF/HDF");
-    StringCchCopyW(lpVFSInfo->lpszDescription, lpVFSInfo->cchDescriptionMax, L"Amiga Dos disk support");
-    StringCchCopyW(lpVFSInfo->lpszCopyright, lpVFSInfo->cchCopyrightMax, L"(c) Copyright 2018 Robert Crossfield");
-    StringCchCopyW(lpVFSInfo->lpszURL, lpVFSInfo->cchURLMax, L"github.com/segrax");
+    std::wstring Extensions;
+    for (auto& ext : firy::cFiry::getKnownExtensions()) {
+        if (!Extensions.empty())
+            Extensions += L";";
+        Extensions += L"." + s2ws(ext);
+    }
+
+    StringCchCopyW(lpVFSInfo->lpszHandleExts, lpVFSInfo->cchHandleExtsMax, Extensions.c_str());
+    StringCchCopyW(lpVFSInfo->lpszName, lpVFSInfo->cchNameMax, L"Amiga/C64 Disk Images (firy)");
+    StringCchCopyW(lpVFSInfo->lpszDescription, lpVFSInfo->cchDescriptionMax, L"Amiga (ADF/HDF), Commodore 64 (D64/D71/D81) and FAT/ISO9660 disk image support");
+    StringCchCopyW(lpVFSInfo->lpszCopyright, lpVFSInfo->cchCopyrightMax, L"(c) Copyright 2026");
+    StringCchCopyW(lpVFSInfo->lpszURL, lpVFSInfo->cchURLMax, L"github.com/segrax/firy");
 
     return true;
 }
@@ -73,43 +79,39 @@ bool VFS_USBSafe(LPOPUSUSBSAFEDATA pUSBSafeData) {
 }
 
 HANDLE VFS_Create(LPGUID pGuid) {
-    return (HANDLE)new cADFPluginData();
+    return (HANDLE)new cFiryPluginData();
 }
 
 void VFS_Destroy(HANDLE hData) {
-    delete (cADFPluginData*)hData;
+    delete (cFiryPluginData*)hData;
 }
 
 bool VFS_ReadFile(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFile, LPVOID lpData, DWORD dwSize, LPDWORD lpdwReadSize) {
-    return (hData) ? ((cADFPluginData*)hData)->ReadFile((File*)hFile, dwSize, (std::uint8_t*) lpData, lpdwReadSize) : false;
-    
+    return (hData) ? ((cFiryPluginData*)hData)->ReadFile(hFile, dwSize, (std::uint8_t*)lpData, lpdwReadSize) : false;
 }
 
 void VFS_CloseFile(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFile) {
-    ((cADFPluginData*)hData)->CloseFile((File*)hFile);
+    ((cFiryPluginData*)hData)->CloseFile(hFile);
 }
 
 HANDLE VFS_CreateFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, DWORD dwMode, DWORD dwFileAttr, DWORD dwFlags, LPFILETIME lpFT) {
-    return (hData) ? ((cADFPluginData*)hData)->OpenFile(lpszPath) : 0;
-
+    return (hData) ? ((cFiryPluginData*)hData)->OpenFile(lpszPath) : 0;
 }
 
 bool VFS_ReadDirectoryW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPVFSREADDIRDATAW lpRDD) {
-    return (hData) ? ((cADFPluginData*)hData)->ReadDirectory(lpRDD) : false;
+    return (hData) ? ((cFiryPluginData*)hData)->ReadDirectory(lpRDD) : false;
 }
 
 int VFS_ContextVerbW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPVFSCONTEXTVERBDATAW lpVerbData) {
-
-    return (hData) ? ((cADFPluginData*)hData)->ContextVerb(lpVerbData) : VFSCVRES_FAIL;
+    return (hData) ? ((cFiryPluginData*)hData)->ContextVerb(lpVerbData) : VFSCVRES_FAIL;
 }
 
 UINT VFS_BatchOperationW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, LPVFSBATCHDATAW lpBatchData) {
-    return (hData) ? ((cADFPluginData*)hData)->BatchOperation(lpszPath, lpBatchData) : VFSCVRES_FAIL;
+    return (hData) ? ((cFiryPluginData*)hData)->BatchOperation(lpszPath, lpBatchData) : VFSCVRES_FAIL;
 }
 
 bool VFS_PropGetW(HANDLE hData, vfsProperty propId, LPVOID lpPropData, LPVOID lpData1, LPVOID lpData2, LPVOID lpData3) {
-
-    return (hData) ? ((cADFPluginData*)hData)->PropGet(propId, lpPropData, lpData1, lpData2, lpData3) : VFSCVRES_FAIL;
+    return (hData) ? ((cFiryPluginData*)hData)->PropGet(propId, lpPropData, lpData1, lpData2, lpData3) : VFSCVRES_FAIL;
 }
 
 bool VFS_GetFreeDiskSpaceW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPWSTR lpszPath, unsigned __int64* piFreeBytesAvailable, unsigned __int64* piTotalBytes, unsigned __int64* piTotalFreeBytes) {
@@ -117,27 +119,26 @@ bool VFS_GetFreeDiskSpaceW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPWSTR lpszPa
     if (!hData)
         return false;
 
-    if(piFreeBytesAvailable)
-        *piFreeBytesAvailable = ((cADFPluginData*)hData)->TotalFreeBlocks(lpszPath);
+    if (piFreeBytesAvailable)
+        *piFreeBytesAvailable = ((cFiryPluginData*)hData)->TotalFreeBlocks(lpszPath);
 
-    if(piTotalFreeBytes)
-        *piTotalFreeBytes = ((cADFPluginData*)hData)->TotalFreeBlocks(lpszPath);
+    if (piTotalFreeBytes)
+        *piTotalFreeBytes = ((cFiryPluginData*)hData)->TotalFreeBlocks(lpszPath);
 
-    if(piTotalBytes)
-        *piTotalBytes = ((cADFPluginData*)hData)->TotalDiskBlocks(lpszPath);
-    
+    if (piTotalBytes)
+        *piTotalBytes = ((cFiryPluginData*)hData)->TotalDiskBlocks(lpszPath);
+
     return true;
 }
 
 HANDLE VFS_FindFirstFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent) {
-
-    return (hData) ? (HANDLE)((cADFPluginData*)hData)->FindFirstFile(lpszPath, lpwfdData, hAbortEvent) : INVALID_HANDLE_VALUE;
+    return (hData) ? (HANDLE)((cFiryPluginData*)hData)->FindFirstFile(lpszPath, lpwfdData, hAbortEvent) : INVALID_HANDLE_VALUE;
 }
 
 bool VFS_FindNextFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFind, LPWIN32_FIND_DATA lpwfdData) {
-    return (hData && hFind) ? ((cADFPluginData*)hData)->FindNextFile((cADFFindData*)hFind, lpwfdData) : false;
+    return (hData && hFind) ? ((cFiryPluginData*)hData)->FindNextFile((cFiryFindData*)hFind, lpwfdData) : false;
 }
 
 void VFS_FindClose(HANDLE hData, HANDLE hFind) {
-    if (hData && hFind) ((cADFPluginData*)hData)->FindClose((cADFFindData*)hFind);
+    if (hData && hFind) ((cFiryPluginData*)hData)->FindClose((cFiryFindData*)hFind);
 }

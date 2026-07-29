@@ -2,67 +2,29 @@
 //
 
 #include "stdafx.h"
-#include "ADFlib/src/adflib.h"
-#include <clocale>
-#include <locale>
 #include <string>
 #include <iostream>
-#include <codecvt>
 
 DOpusPluginHelperFunction DOpus;
 
 std::wstring s2ws(const std::string& str) {
-    using convert_typeX = std::codecvt_utf8<wchar_t>;
-    std::wstring_convert<convert_typeX, wchar_t> converterX;
+    if (str.empty())
+        return std::wstring();
 
-    return converterX.from_bytes(str);
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), 0, 0);
+    std::wstring result(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &result[0], len);
+    return result;
 }
 
 std::string ws2s(const std::wstring& wstr) {
-    using convert_typeX = std::codecvt_utf8<wchar_t>;
-    std::wstring_convert<convert_typeX, wchar_t> converterX;
+    if (wstr.empty())
+        return std::string();
 
-    return converterX.to_bytes(wstr);
-}
-
-
-bool adfIsLeap(int y) {
-    return((bool)(!(y % 100) ? !(y % 400) : !(y % 4)));
-}
-
-void adfTime2AmigaTime(struct DateTime dt, int32_t *day, int32_t *min, int32_t *ticks) {
-    int jm[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-
-
-    *min = dt.hour * 60 + dt.min;                /* mins */
-    *ticks = dt.sec * 50;                        /* ticks */
-
-                                                 /*--- days ---*/
-
-    *day = dt.day;                         /* current month days */
-
-                                               /* previous months days downto january */
-    if (dt.mon > 1) {                      /* if previous month exists */
-        dt.mon--;
-        if (dt.mon > 2 && adfIsLeap(dt.year))    /* months after a leap february */
-            jm[2 - 1] = 29;
-        while (dt.mon > 0) {
-            *day = *day + jm[dt.mon - 1];
-            dt.mon--;
-        }
-    }
-
-    /* years days before current year downto 1978 */
-    if (dt.year > 78) {
-        dt.year--;
-        while (dt.year >= 78) {
-            if (adfIsLeap(dt.year))
-                *day = *day + 366;
-            else
-                *day = *day + 365;
-            dt.year--;
-        }
-    }
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), 0, 0, 0, 0);
+    std::string result(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], len, 0, 0);
+    return result;
 }
 
 std::vector<std::wstring> tokenize(const std::wstring& in, const std::wstring& delim) {
@@ -81,54 +43,55 @@ std::vector<std::wstring> tokenize(const std::wstring& in, const std::wstring& d
     return tokens;
 }
 
-cADFPluginData::cADFPluginData() {
-    mAdfDevice = 0;
-    mAdfVolume = 0;
+cFiryPluginData::cFiryPluginData() {
+    mLastError = 0;
 }
 
-cADFPluginData::~cADFPluginData() {
+cFiryPluginData::~cFiryPluginData() {
 
 }
 
-FILETIME cADFPluginData::GetFileTime(const Entry *pEntry) {
-    SYSTEMTIME AmigaTime, TZAdjusted;
-    AmigaTime.wDayOfWeek = 0;
-    AmigaTime.wMilliseconds = 0;
-    AmigaTime.wYear = pEntry->year;
-    AmigaTime.wMonth = pEntry->month;
-    AmigaTime.wDay = pEntry->days;
-    AmigaTime.wHour = pEntry->hour;
-    AmigaTime.wMinute = pEntry->mins;
-    AmigaTime.wSecond = pEntry->secs;
-    TzSpecificLocalTimeToSystemTime(NULL, &AmigaTime, &TZAdjusted);
+FILETIME cFiryPluginData::GetFileTime(const firy::helpers::sDateTime& pDT) {
+    SYSTEMTIME LocalTime = {}, UTCTime;
+    LocalTime.wYear = (WORD)pDT.year;
+    LocalTime.wMonth = (WORD)pDT.month;
+    LocalTime.wDay = (WORD)pDT.days;
+    LocalTime.wHour = (WORD)pDT.hour;
+    LocalTime.wMinute = (WORD)pDT.mins;
+    LocalTime.wSecond = (WORD)pDT.secs;
+
+    TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UTCTime);
     FILETIME ft;
-    SystemTimeToFileTime(&TZAdjusted, &ft);
+    SystemTimeToFileTime(&UTCTime, &ft);
     return ft;
 }
 
-DateTime ToDateTime(FILETIME pFT) {
-    SYSTEMTIME AmigaTime, TZAdjusted;
-    FileTimeToSystemTime(&pFT, &AmigaTime);
-    SystemTimeToTzSpecificLocalTime(NULL, &AmigaTime, &TZAdjusted);
+firy::helpers::sDateTime cFiryPluginData::ToDateTime(FILETIME pFT) {
+    SYSTEMTIME UTCTime, LocalTime;
+    FileTimeToSystemTime(&pFT, &UTCTime);
+    SystemTimeToTzSpecificLocalTime(NULL, &UTCTime, &LocalTime);
 
-    DateTime dt;
-    dt.year = TZAdjusted.wYear - 1900;
-    dt.mon = TZAdjusted.wMonth;
-    dt.day = TZAdjusted.wDay;
-    dt.hour = TZAdjusted.wHour;
-    dt.min = TZAdjusted.wMinute;
-    dt.sec = TZAdjusted.wSecond;
-    return dt;
+    return firy::helpers::sDateTime(LocalTime.wYear, LocalTime.wMonth, LocalTime.wDay, LocalTime.wHour, LocalTime.wMinute, LocalTime.wSecond);
 }
 
-void cADFPluginData::SetEntryTime(File *pFile, FILETIME pFT) {
+void cFiryPluginData::GetWfdForEntry(const firy::spNode& pEntry, LPWIN32_FIND_DATA pData) {
+    auto filename = s2ws(pEntry->nameGet());
+    StringCchCopyW(pData->cFileName, MAX_PATH, filename.c_str());
 
-    DateTime dt = ToDateTime(pFT);
+    pData->nFileSizeHigh = 0;
+    pData->nFileSizeLow = (DWORD)pEntry->sizeInBytesGet();
 
-    adfTime2AmigaTime(dt, &(pFile->fileHdr->days), &(pFile->fileHdr->mins), &(pFile->fileHdr->ticks));
+    pData->dwFileAttributes = pEntry->isDirectory() ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+
+    pData->dwReserved0 = 0;
+    pData->dwReserved1 = 0;
+
+    pData->ftCreationTime = {};
+    pData->ftLastAccessTime = {};
+    pData->ftLastWriteTime = GetFileTime(pEntry->timeWriteGet());
 }
 
-LPVFSFILEDATAHEADER cADFPluginData::GetVFSforEntry(const Entry *pEntry, HANDLE pHeap) {
+LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforEntry(const firy::spNode& pEntry, HANDLE pHeap) {
     LPVFSFILEDATAHEADER lpFDH;
 
     if (lpFDH = (LPVFSFILEDATAHEADER)HeapAlloc(pHeap, 0, sizeof(VFSFILEDATAHEADER) + sizeof(VFSFILEDATA))) {
@@ -150,129 +113,61 @@ LPVFSFILEDATAHEADER cADFPluginData::GetVFSforEntry(const Entry *pEntry, HANDLE p
     return lpFDH;
 }
 
-void cADFPluginData::GetWfdForEntry(const Entry *pEntry, LPWIN32_FIND_DATA pData) {
-    auto filename = s2ws(pEntry->name);
-    StringCchCopyW(pData->cFileName, MAX_PATH, filename.c_str());
+/**
+ * Split a full VFS path into the on-disk image file and the path inside it,
+ * by looking for the earliest occurrence of any extension firy knows about.
+ */
+bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
+    std::wstring Lower = pPath;
+    std::transform(Lower.begin(), Lower.end(), Lower.begin(), ::towlower);
 
-    pData->nFileSizeHigh = 0;
-    pData->nFileSizeLow = pEntry->size;
+    size_t BestPos = std::wstring::npos;
+    size_t BestEnd = std::wstring::npos;
 
-    if (pEntry->type == ST_DIR)
-        pData->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-    else
-        pData->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    for (auto& ext : firy::cFiry::getKnownExtensions()) {
+        std::wstring DotExt = L"." + s2ws(ext);
+        size_t Pos = Lower.find(DotExt);
+        if (Pos == std::wstring::npos)
+            continue;
 
-    pData->dwReserved0 = 0;
-    pData->dwReserved1 = 0;
-
-    pData->ftCreationTime = {};
-    pData->ftLastAccessTime = {};
-    pData->ftLastWriteTime = GetFileTime(pEntry);
-}
-
-std::vector<std::wstring> cADFPluginData::GetPaths(std::wstring pPath) {
-    std::vector<std::wstring> Depth;
-
-    if (pPath.find(mPath) != std::wstring::npos) {
-        pPath = pPath.replace(pPath.begin(), pPath.begin() + mPath.length(), L"");
-        Depth = tokenize(pPath, L"\\\\");
-    }
-
-    return Depth;
-}
-
-bool cADFPluginData::AdfChangeToPath(const std::wstring& pPath, bool pIgnoreLast) {
-    bool result = false;
-
-    if (!LoadFile(pPath))
-        return false;
-
-    std::vector<std::wstring> Depth = GetPaths(pPath);
-
-    if (pIgnoreLast) {
-        if (Depth.size() > 0)
-            Depth.erase(Depth.end() - 1);
-    }
-
-    if (mAdfVolume) {
-
-        adfToRootDir(mAdfVolume.get());
-
-        auto head = GetCurrentDirectoryList();
-        List *cell = head.get();
-        while (cell) {
-            struct Entry* entry = (Entry*)cell->content;
-
-            if (!(entry->type == ST_LFILE || entry->type == ST_LDIR || entry->type == ST_LSOFT)) {
-
-                if (Depth.size()) {
-                    auto Filename = s2ws(entry->name);
-
-                    // Found our sub directory?
-                    if (!Depth[0].compare(Filename)) {
-
-                        // Free current cell, and load the next
-                        if (entry->type == ST_DIR || entry->type == ST_LDIR || Depth.size() > 1) {
-                            adfChangeDir(mAdfVolume.get(), entry->name);
-
-                            head = GetCurrentDirectoryList();
-                            cell = head.get();
-                        }
-
-                        Depth.erase(Depth.begin());
-
-                        // Empty folder?
-                        if (!cell || !Depth.size())
-                            return true;
-
-                        continue;
-                    }
-                }
-                else {
-                    result = true;
-                    break;
-                }
-            }
-
-            cell = cell->next;
+        if (BestPos == std::wstring::npos || Pos < BestPos) {
+            BestPos = Pos;
+            BestEnd = Pos + DotExt.size();
         }
     }
 
-    return result;
-}
-
-bool cADFPluginData::LoadFile(const std::wstring& pAdfPath) {
-    std::wstring AdfPath = pAdfPath;
-
-    std::transform(AdfPath.begin(), AdfPath.end(), AdfPath.begin(), ::tolower);
-    size_t EndPos = AdfPath.find(L".adf");
-    if (EndPos == std::wstring::npos) {
-        EndPos = AdfPath.find(L".hdf");
-    }
-    if (EndPos == std::wstring::npos)
+    if (BestEnd == std::wstring::npos)
         return false;
-    AdfPath = pAdfPath.substr(0, EndPos + 4);
 
-    if (!mAdfDevice || !mAdfVolume) {
-        // Find an open device for this disk image
-        auto Filepath = ws2s(AdfPath);
+    std::wstring ImagePath = pPath.substr(0, BestEnd);
 
-        mAdfDevice = std::move(std::shared_ptr<Device>(adfMountDev(const_cast<CHAR*>(Filepath.c_str()), true), adfUnMountDev));
-        if(mAdfDevice)
-            mAdfVolume = std::shared_ptr<Volume>(adfMount(mAdfDevice.get(), 0, true), adfUnMount);
-                
-        if (mAdfVolume) {
-            mPath = AdfPath;
-            return true;
-        }
+    if (mImage && mImagePath == ImagePath)
+        return true;
 
+    auto image = firy::gFiry->openImage(ws2s(ImagePath));
+    if (!image)
         return false;
-    }
 
+    mImage = image;
+    mImagePath = ImagePath;
     return true;
 }
 
-bool cADFPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
+std::wstring cFiryPluginData::GetInnerPath(const std::wstring& pPath) {
+    std::wstring Remainder = pPath;
+
+    if (Remainder.size() >= mImagePath.size() && !Remainder.compare(0, mImagePath.size(), mImagePath))
+        Remainder = Remainder.substr(mImagePath.size());
+
+    std::replace(Remainder.begin(), Remainder.end(), L'\\', L'/');
+    return Remainder;
+}
+
+std::string cFiryPluginData::InnerPathUtf8(const std::wstring& pPath) {
+    return ws2s(GetInnerPath(pPath));
+}
+
+bool cFiryPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
 
     // Free directory if lister is closing (otherwise ignore free command)
     if (lpRDD->vfsReadOp == VFSREAD_FREEDIRCLOSE)
@@ -287,247 +182,214 @@ bool cADFPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
         return false;
     }
 
-    if (!AdfChangeToPath(lpRDD->lpszPath))
+    if (!LoadFile(lpRDD->lpszPath))
+        return false;
+
+    auto dir = mImage->filesystemPath(InnerPathUtf8(lpRDD->lpszPath));
+    if (!dir)
         return false;
 
     if (lpRDD->vfsReadOp == VFSREAD_CHANGEDIR)
         return true;
 
-    auto head = GetCurrentDirectoryList();
-    List *cell = head.get();
-
     LPVFSFILEDATAHEADER lpLastHeader = 0;
-    while (cell) {
-        struct Entry* entry = (Entry*)cell->content;
+    for (auto& node : dir->mNodes) {
+        LPVFSFILEDATAHEADER lpFDH = GetVFSforEntry(node, lpRDD->hMemHeap);
 
-        if (!(entry->type == ST_LFILE || entry->type == ST_LDIR || entry->type == ST_LSOFT)) {
-            LPVFSFILEDATAHEADER lpFDH = GetVFSforEntry(entry, lpRDD->hMemHeap);
+        if (lpFDH) {
+            if (lpLastHeader)
+                lpLastHeader->lpNext = lpFDH;
+            else
+                lpRDD->lpFileData = lpFDH;
 
-            // Add the entries for this folder
-            if (lpFDH) {
-                if (lpLastHeader)
-                    lpLastHeader->lpNext = lpFDH;
-                else
-                    lpRDD->lpFileData = lpFDH;
-
-                lpLastHeader = lpFDH;
-            }
+            lpLastHeader = lpFDH;
         }
-
-        cell = cell->next;
     }
 
     return true;
 }
 
-bool cADFPluginData::ReadFile(File* pFile, size_t pBytes, std::uint8_t* pBuffer, LPDWORD pReadSize) {
+bool cFiryPluginData::ReadFile(HANDLE hFile, size_t pBytes, std::uint8_t* pBuffer, LPDWORD pReadSize) {
 
-    if (!pFile)
+    auto handle = (sFiryFileHandle*)hFile;
+    if (!handle || !handle->mBuffer) {
+        *pReadSize = 0;
         return false;
-
-    *pReadSize = adfReadFile(pFile, (int32_t)pBytes, pBuffer);
-
-    return (*pReadSize > 0);
-}
-
-File* cADFPluginData::OpenFile(std::wstring pPath) {
-
-    if (AdfChangeToPath(pPath)) {
-
-        auto Paths = GetPaths(pPath);
-
-        auto Filename = ws2s(Paths[Paths.size() - 1]);
-
-        return adfOpenFile(mAdfVolume.get(), (char*)Filename.c_str(), (char*) "r");
     }
 
-    return 0;
+    size_t Remaining = handle->mBuffer->size() - handle->mOffset;
+    size_t ToRead = min(pBytes, Remaining);
+
+    if (ToRead)
+        memcpy(pBuffer, handle->mBuffer->data() + handle->mOffset, ToRead);
+
+    handle->mOffset += ToRead;
+    *pReadSize = (DWORD)ToRead;
+
+    return ToRead > 0;
 }
 
-void cADFPluginData::CloseFile(File* pFile) {
+HANDLE cFiryPluginData::OpenFile(std::wstring pPath) {
 
-    adfCloseFile(pFile);
+    if (!LoadFile(pPath))
+        return 0;
+
+    auto file = mImage->filesystemFile(InnerPathUtf8(pPath));
+    if (!file)
+        return 0;
+
+    auto handle = new sFiryFileHandle();
+    handle->mFile = file;
+    handle->mBuffer = file->read();
+
+    return (HANDLE)handle;
 }
 
-spList cADFPluginData::GetCurrentDirectoryList() {
-
-    return std::shared_ptr<List>(adfGetDirEnt(mAdfVolume.get(), mAdfVolume->curDirPtr), adfFreeDirList);
+void cFiryPluginData::CloseFile(HANDLE hFile) {
+    delete (sFiryFileHandle*)hFile;
 }
 
-int cADFPluginData::ContextVerb(LPVFSCONTEXTVERBDATAW lpVerbData) {
+int cFiryPluginData::ContextVerb(LPVFSCONTEXTVERBDATAW lpVerbData) {
 
-    if (AdfChangeToPath(lpVerbData->lpszPath, true)) {
-        auto Depth = GetPaths(lpVerbData->lpszPath);
+    if (!LoadFile(lpVerbData->lpszPath))
+        return VFSCVRES_FAIL;
 
-        auto head = GetCurrentDirectoryList();
-        List *cell = head.get();
+    auto node = mImage->filesystemNode(InnerPathUtf8(lpVerbData->lpszPath));
+    if (!node)
+        return VFSCVRES_FAIL;
 
-        while (cell) {
-            struct Entry* entry = (Entry*)cell->content;
-            auto Filepath = s2ws(entry->name);
-
-            if (!Depth[Depth.size() - 1].compare(Filepath)) {
-
-                if (entry->type == ST_FILE)
-                    return VFSCVRES_EXTRACT;
-
-                if (entry->type == ST_DIR)
-                    return VFSCVRES_DEFAULT;
-            }
-
-            cell = cell->next;
-        }
-    }
-
-    return VFSCVRES_FAIL;
+    return node->isDirectory() ? VFSCVRES_DEFAULT : VFSCVRES_EXTRACT;
 }
 
-int cADFPluginData::Delete(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pFile, bool pAll) {
-    int result = 0;
+int cFiryPluginData::Delete(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pFile) {
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)"Deleting");
 
-    auto Depth = tokenize(pFile, L"\\\\");
+    if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
+        return 1;
 
-    if (AdfChangeToPath(pPath)) {
+    if (!LoadFile(pFile))
+        return 1;
 
-        auto head = GetCurrentDirectoryList();
-        List *cell = head.get();
+    auto node = mImage->filesystemNode(InnerPathUtf8(pFile));
+    if (!node)
+        return 1;
 
-        while (cell) {
-            if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0) {
-                return 1;
-            }
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)node->nameGet().c_str());
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)node->sizeInBytesGet());
 
-            struct Entry* entry = (Entry*)cell->content;
-            auto Filename = s2ws(entry->name);
+    // firy's sNode::remove() already tears down whole sub-trees recursively
+    if (!node->remove())
+        return 1;
 
-            // Entry match?
-            if (pAll || !Depth[Depth.size() - 1].compare(Filename)) {
-                DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)entry->name);
-                DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)entry->size);
-
-                std::wstring Filename = pPath;
-
-                if (Filename[Filename.size() - 1] != '\\')
-                    Filename += L"\\";
-                auto Filepath = s2ws(entry->name);
-                Filename += Filepath;
-
-                if (entry->type == ST_FILE) {
-                    result |= adfRemoveEntry(mAdfVolume.get(), entry->parent, entry->name);
-                    if (!result)
-                        DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_REMDIR, Filename.c_str());
-                }
-
-                if (entry->type == ST_DIR) {
-
-                    Delete(lpBatchData, Filename, Filepath, true);
-                    result |= adfRemoveEntry(mAdfVolume.get(), entry->parent, entry->name);
-                    AdfChangeToPath(pPath);
-                    if (!result)
-                        DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_REMDIR, Filename.c_str());
-                }
-            }
-
-            cell = cell->next;
-        }
-    }
-
+    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_REMDIR, pFile.c_str());
     return 0;
 }
 
-cADFFindData* cADFPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent) {
+cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent) {
 
-    cADFFindData* findData = new cADFFindData();
+    cFiryFindData* findData = new cFiryFindData();
 
-    if (AdfChangeToPath(lpszPath, true)) {
+    if (LoadFile(lpszPath)) {
 
-        auto depth = tokenize(lpszPath, L"\\\\");
-        auto filemask = depth[depth.size() - 1];
-        auto Filepath = ws2s(filemask);
+        auto Inner = GetInnerPath(lpszPath);
+        auto Depth = tokenize(Inner, L"/");
 
-        findData->mFindMask = std::regex("(." + Filepath + ")");
+        std::wstring FileMask = Depth.empty() ? L"" : Depth.back();
+        if (!Depth.empty())
+            Depth.pop_back();
 
-        findData->mHead = GetCurrentDirectoryList();
-        findData->mCell = findData->mHead.get();
+        std::wstring ParentInner;
+        for (auto& Seg : Depth)
+            ParentInner += L"/" + Seg;
+        if (ParentInner.empty())
+            ParentInner = L"/";
 
-        while (findData->mCell) {
-            struct Entry* entry = (Entry*)findData->mCell->content;
+        auto parentDir = mImage->filesystemPath(ws2s(ParentInner));
+        if (parentDir) {
+            findData->mDirectory = parentDir;
+            findData->mFindMask = std::regex("(." + ws2s(FileMask) + ")");
 
-            if (std::regex_match(entry->name, findData->mFindMask)) {
+            while (findData->mIndex < parentDir->mNodes.size()) {
+                auto& node = parentDir->mNodes[findData->mIndex];
+                findData->mIndex++;
 
-                if (!(entry->type == ST_LFILE || entry->type == ST_LDIR || entry->type == ST_LSOFT)) {
-
-                    GetWfdForEntry(entry, lpwfdData);
-                    findData->mCell = findData->mCell->next;
+                if (std::regex_match(node->nameGet(), findData->mFindMask)) {
+                    GetWfdForEntry(node, lpwfdData);
                     break;
                 }
             }
-
-            findData->mCell = findData->mCell->next;
         }
     }
 
     return findData;
 }
 
-bool cADFPluginData::FindNextFile(cADFFindData* pFindData, LPWIN32_FIND_DATA lpwfdData) {
+bool cFiryPluginData::FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA lpwfdData) {
 
-    while (pFindData->mCell) {
-        struct Entry* entry = (Entry*)pFindData->mCell->content;
+    if (!pFindData->mDirectory)
+        return false;
 
-        if (std::regex_match(entry->name, pFindData->mFindMask)) {
+    while (pFindData->mIndex < pFindData->mDirectory->mNodes.size()) {
+        auto& node = pFindData->mDirectory->mNodes[pFindData->mIndex];
+        pFindData->mIndex++;
 
-            if (!(entry->type == ST_LFILE || entry->type == ST_LDIR || entry->type == ST_LSOFT)) {
-
-                GetWfdForEntry(entry, lpwfdData);
-
-                pFindData->mCell = pFindData->mCell->next;
-                return true;
-            }
+        if (std::regex_match(node->nameGet(), pFindData->mFindMask)) {
+            GetWfdForEntry(node, lpwfdData);
+            return true;
         }
-
-        pFindData->mCell = pFindData->mCell->next;
     }
 
     return false;
 }
 
-void cADFPluginData::FindClose(cADFFindData* pFindData) {
+void cFiryPluginData::FindClose(cFiryFindData* pFindData) {
     delete pFindData;
 }
 
-int cADFPluginData::ImportFile(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
+int cFiryPluginData::ImportFile(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
 
-    auto Depth = tokenize(pPath, L"\\\\");
+    auto Depth = tokenize(pPath, L"\\/");
+    std::wstring ItemName = Depth.empty() ? pPath : Depth.back();
 
-    std::ifstream t(pPath, std::ios::binary);
-    std::wstring FileData((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)ItemName.c_str());
 
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)Depth[Depth.size()-1].c_str());
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)FileData.size());
-
-
-    FILETIME ft;
-    HANDLE filename = CreateFile(pPath.c_str(), FILE_READ_ATTRIBUTES, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    ::GetFileTime(filename, 0, 0, &ft);
-    CloseHandle(filename);
-
-    auto File = adfOpenFile(mAdfVolume.get(), (char*)Depth[Depth.size() - 1].c_str(), (char*) "w");
-    if (!File)
+    auto content = firy::gResources->FileRead(ws2s(pPath));
+    if (!content)
         return 1;
 
-    SetEntryTime(File, ft);
-    adfWriteFile(File, (int32_t) FileData.size(), reinterpret_cast<uint8_t*>(&FileData[0]));
-    adfCloseFile(File);
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)content->size());
+
+    if (!LoadFile(pFile))
+        return 1;
+
+    auto parentDir = mImage->filesystemPath(InnerPathUtf8(pFile));
+    if (!parentDir)
+        return 1;
+
+    auto newFile = mImage->filesystemFileCreate(ws2s(ItemName));
+    if (!newFile)
+        return 1;
+
+    newFile->mContent = content;
+    newFile->sizeInBytesSet(content->size());
+
+    FILETIME ft;
+    HANDLE hSrc = CreateFile(pPath.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ::GetFileTime(hSrc, 0, 0, &ft);
+    CloseHandle(hSrc);
+
+    auto dt = ToDateTime(ft);
+    newFile->timeWriteSet(dt);
+
+    if (!parentDir->add(newFile))
+        return 1;
 
     std::wstring Final = pFile;
     if (Final[Final.size() - 1] != L'\\')
         Final += L"\\";
-    Final += Depth[Depth.size() - 1];
+    Final += ItemName;
 
     DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_CREATE, Final.c_str());
-
     return 0;
 }
 
@@ -560,204 +422,175 @@ std::vector<std::wstring> directoryList(const std::wstring pPath) {
     return results;
 }
 
-int cADFPluginData::ImportPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
+int cFiryPluginData::ImportPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
 
-    std::wstring FinalPath = pPath;
-    if (FinalPath[FinalPath.size() - 1] != L'\\')
-        FinalPath += L"\\";
+    std::wstring FinalLocalPath = pPath;
+    if (FinalLocalPath[FinalLocalPath.size() - 1] != L'\\')
+        FinalLocalPath += L"\\";
 
-    auto Depth = tokenize(pPath, L"\\\\");
-    std::wstring Final = pFile;
-    if (Final[Final.size() - 1] != L'\\')
-        Final += L"\\";
-    Final += Depth[Depth.size() - 1];
+    auto Depth = tokenize(pPath, L"\\/");
+    std::wstring DirName = Depth.empty() ? pPath : Depth.back();
 
-    FILETIME ft;
-    HANDLE filename = CreateFile(pPath.c_str(), FILE_READ_ATTRIBUTES, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    ::GetFileTime(filename, 0, 0, &ft);
-    CloseHandle(filename);
-    DateTime dt = ToDateTime(ft);
+    if (!LoadFile(pFile))
+        return 1;
 
-    adfCreateDir(mAdfVolume.get(), mAdfVolume->curDirPtr, (char*)Depth[Depth.size() - 1].c_str(), dt);
-    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_MAKEDIR, Final.c_str());
+    auto parentDir = mImage->filesystemPath(InnerPathUtf8(pFile));
+    if (!parentDir)
+        return 1;
 
-    auto head = GetCurrentDirectoryList();
-    List *cell = head.get();
+    auto newDir = mImage->filesystemDirectoryCreate(ws2s(DirName));
+    if (!newDir)
+        // Filesystem doesn't support sub-directories (eg. a flat C64 disk)
+        return 1;
 
-    while (cell) {
-        struct Entry* entry = (Entry*)cell->content;
-        auto Filename = s2ws(entry->name);
+    if (!parentDir->add(newDir))
+        return 1;
 
-        if (!Depth[Depth.size() - 1].compare(Filename)) {
+    std::wstring FinalVfsPath = pFile;
+    if (FinalVfsPath[FinalVfsPath.size() - 1] != L'\\')
+        FinalVfsPath += L"\\";
+    FinalVfsPath += DirName;
 
-            auto contents = directoryList(FinalPath + L"*.*");
+    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_MAKEDIR, FinalVfsPath.c_str());
 
-            for (auto& File : contents) {
-                if (File == L"." || File == L"..")
-                    continue;
+    auto contents = directoryList(FinalLocalPath + L"*.*");
 
-                Import(lpBatchData, pFile + L"\\" + Depth[Depth.size() - 1] + L"\\", FinalPath + File);
-            }
+    for (auto& File : contents) {
+        if (File == L"." || File == L"..")
+            continue;
 
-        }
-
-        cell = cell->next;
-    }
-
-
-    return 0;
-}
-
-int cADFPluginData::Import(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
-
-    if (AdfChangeToPath(pFile, false)) {
-
-        if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0) {
-            return 1;
-        }
-
-        // is pPath a directory?
-        auto Attribs = GetFileAttributes(pPath.c_str());
-
-        if (Attribs & FILE_ATTRIBUTE_DIRECTORY)
-            ImportPath(lpBatchData, pFile, pPath);
-        else {
-            ImportFile(lpBatchData, pFile, pPath);
-        }
+        Import(lpBatchData, FinalVfsPath, FinalLocalPath + File);
     }
 
     return 0;
 }
 
-int cADFPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pDest) {
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)"Copying");
+int cFiryPluginData::Import(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
 
-    int result = 1;
+    if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
+        return 1;
 
-    if (AdfChangeToPath(pFile, true)) {
-        auto Depth = GetPaths(pFile);
+    auto Attribs = GetFileAttributes(pPath.c_str());
+    if (Attribs == INVALID_FILE_ATTRIBUTES)
+        return 1;
 
-        auto head = GetCurrentDirectoryList();
-        List *cell = head.get();
+    if (Attribs & FILE_ATTRIBUTE_DIRECTORY)
+        return ImportPath(lpBatchData, pFile, pPath);
 
-        while (cell) {
-
-            if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0) {
-                return 1;
-            }
-
-            struct Entry* entry = (Entry*)cell->content;
-
-            std::wstring FinalName = pDest;
-            if (FinalName[FinalName.size() - 1] != '\\') {
-                FinalName += '\\';
-            }
-            auto Filename = s2ws(entry->name);
-            FinalName += Filename;
-
-            // Entry match?
-            if (!Depth[Depth.size() - 1].compare(Filename)) {
-
-                DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)entry->name);
-                DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)entry->size);
-
-                // Create a directory, or extract a file?
-                if (entry->type == ST_DIR) {
-                    CreateDirectory(FinalName.c_str(), 0);
-                    result = ExtractPath(lpBatchData, pFile, FinalName);
-                    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, lpBatchData->pszDestPath);
-
-                    if (!result) {
-                        HANDLE filename = CreateFile(FinalName.c_str(), FILE_WRITE_ATTRIBUTES, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-                        SetFileTime(filename, 0, 0, &GetFileTime(entry));
-                        CloseHandle(filename);
-                    }
-                }
-                else {
-                    result = ExtractFile(lpBatchData, entry, FinalName);
-                }
-
-                DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_NEXTFILE, 0);
-                break;
-            }
-
-            cell = cell->next;
-        }
-    }
-
-    return result;
+    return ImportFile(lpBatchData, pFile, pPath);
 }
 
-int cADFPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pDest) {
-    int result = 0;
+int cFiryPluginData::ExtractFile(LPVFSBATCHDATAW lpBatchData, const firy::spNode& pEntry, const std::wstring& pDest) {
 
-    if (AdfChangeToPath(pPath)) {
-
-        auto head = GetCurrentDirectoryList();
-        List *cell = head.get();
-
-        while (cell) {
-            struct Entry* entry = (Entry*)cell->content;
-
-            std::wstring FinalPath = pPath;
-            if (FinalPath[FinalPath.size() - 1] != '\\') {
-                FinalPath += '\\';
-            }
-            auto Filepath = s2ws(entry->name);
-            FinalPath += Filepath;
-
-            result |= Extract(lpBatchData, FinalPath, pDest);
-
-            cell = cell->next;
-        }
-    }
-
-    return result;
-}
-int cADFPluginData::ExtractFile(LPVFSBATCHDATAW lpBatchData, const Entry* pEntry, const std::wstring& pDest) {
-    std::string buffer(pEntry->size, 0);
-
-    auto file = adfOpenFile(mAdfVolume.get(), pEntry->name, (char*)"r");
+    auto file = std::dynamic_pointer_cast<firy::filesystem::sFile>(pEntry);
     if (!file)
         return 1;
 
-    auto n = adfReadFile(file, pEntry->size, reinterpret_cast<uint8_t*>(&buffer[0]));
-    if (!n)
+    auto content = file->read();
+    if (!content)
         return 2;
 
-    std::ofstream ofile(pDest, std::ios::binary);
-    ofile.write(buffer.c_str(), buffer.size());
-    ofile.close();
+    if (!firy::gResources->FileSave(ws2s(pDest), content))
+        return 2;
 
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STEPBYTES, (DWORD_PTR)pEntry->size);
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STEPBYTES, (DWORD_PTR)content->size());
 
-    HANDLE filename = CreateFile(pDest.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    SetFileTime(filename, 0, 0, &GetFileTime(pEntry));
-    CloseHandle(filename);
+    HANDLE hDst = CreateFile(pDest.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    auto ft = GetFileTime(pEntry->timeWriteGet());
+    SetFileTime(hDst, 0, 0, &ft);
+    CloseHandle(hDst);
 
-    adfCloseFile(file);
     DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, lpBatchData->pszDestPath);
     return 0;
 }
 
-size_t cADFPluginData::TotalFreeBlocks(const std::wstring& pFile) {
+int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pDest) {
 
-    if (!LoadFile(pFile)) 
-        return false;
+    if (!LoadFile(pPath))
+        return 1;
 
-    size_t blocks = adfCountFreeBlocks(mAdfVolume.get());
-    blocks *= mAdfVolume->datablockSize;
+    auto dir = mImage->filesystemPath(InnerPathUtf8(pPath));
+    if (!dir)
+        return 1;
 
-    return blocks;
+    int result = 0;
+    for (auto& node : dir->mNodes) {
+
+        std::wstring ChildPath = pPath;
+        if (ChildPath[ChildPath.size() - 1] != L'\\')
+            ChildPath += L"\\";
+        ChildPath += s2ws(node->nameGet());
+
+        result |= Extract(lpBatchData, ChildPath, pDest);
+    }
+
+    return result;
 }
 
-size_t cADFPluginData::TotalDiskBlocks(const std::wstring& pFile) {
-    return (size_t)mAdfDevice->size;
+int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pDest) {
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)"Copying");
+
+    if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
+        return 1;
+
+    if (!LoadFile(pFile))
+        return 1;
+
+    auto node = mImage->filesystemNode(InnerPathUtf8(pFile));
+    if (!node)
+        return 1;
+
+    auto Depth = tokenize(pFile, L"\\/");
+    std::wstring ItemName = Depth.empty() ? pFile : Depth.back();
+
+    std::wstring FinalName = pDest;
+    if (FinalName[FinalName.size() - 1] != '\\')
+        FinalName += '\\';
+    FinalName += ItemName;
+
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)ItemName.c_str());
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)node->sizeInBytesGet());
+
+    int result;
+    if (node->isDirectory()) {
+        CreateDirectory(FinalName.c_str(), 0);
+        result = ExtractPath(lpBatchData, pFile, FinalName);
+        DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, lpBatchData->pszDestPath);
+
+        if (!result) {
+            HANDLE hDst = CreateFile(FinalName.c_str(), FILE_WRITE_ATTRIBUTES, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            auto ft = GetFileTime(node->timeWriteGet());
+            SetFileTime(hDst, 0, 0, &ft);
+            CloseHandle(hDst);
+        }
+    }
+    else {
+        result = ExtractFile(lpBatchData, node, FinalName);
+    }
+
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_NEXTFILE, 0);
+    return result;
 }
 
-UINT cADFPluginData::BatchOperation(LPTSTR lpszPath, LPVFSBATCHDATAW lpBatchData) {
+size_t cFiryPluginData::TotalFreeBlocks(const std::wstring& pFile) {
+
+    if (!LoadFile(pFile))
+        return 0;
+
+    return mImage->filesystemTotalBytesFree();
+}
+
+size_t cFiryPluginData::TotalDiskBlocks(const std::wstring& pFile) {
+
+    if (!LoadFile(pFile))
+        return 0;
+
+    return mImage->filesystemTotalBytesMax();
+}
+
+UINT cFiryPluginData::BatchOperation(LPTSTR lpszPath, LPVFSBATCHDATAW lpBatchData) {
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETPERCENT, (DWORD_PTR)0);
-    
+
     auto result = VFSBATCHRES_COMPLETE;
 
     auto File = lpBatchData->pszFiles;
@@ -787,7 +620,7 @@ UINT cADFPluginData::BatchOperation(LPTSTR lpszPath, LPVFSBATCHDATAW lpBatchData
     return result;
 }
 
-bool cADFPluginData::PropGet(vfsProperty propId, LPVOID lpPropData, LPVOID lpData1, LPVOID lpData2, LPVOID lpData3) {
+bool cFiryPluginData::PropGet(vfsProperty propId, LPVOID lpPropData, LPVOID lpData1, LPVOID lpData2, LPVOID lpData3) {
 
     if (propId == VFSPROP_SHOWTHUMBNAILS) {
 
@@ -799,7 +632,8 @@ bool cADFPluginData::PropGet(vfsProperty propId, LPVOID lpPropData, LPVOID lpDat
     if (propId == VFSPROP_FUNCAVAILABILITY) {
         unsigned __int64* Data = (unsigned __int64*)lpPropData;
 
-        *Data &= ~(VFSFUNCAVAIL_DELETE | VFSFUNCAVAIL_MAKEDIR | VFSFUNCAVAIL_RENAME | VFSFUNCAVAIL_SETATTR | VFSFUNCAVAIL_CLIPCUT | VFSFUNCAVAIL_CLIPPASTE | VFSFUNCAVAIL_CLIPPASTESHORTCUT | VFSFUNCAVAIL_DUPLICATE);
+        // Rename/SetAttr/Clipboard aren't implemented; Delete and MakeDir are.
+        *Data &= ~(VFSFUNCAVAIL_RENAME | VFSFUNCAVAIL_SETATTR | VFSFUNCAVAIL_CLIPCUT | VFSFUNCAVAIL_CLIPPASTE | VFSFUNCAVAIL_CLIPPASTESHORTCUT | VFSFUNCAVAIL_DUPLICATE);
         return true;
     }
 
