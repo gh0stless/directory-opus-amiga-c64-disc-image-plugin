@@ -14,25 +14,49 @@ class cFiryFindData {
 
 public:
     firy::spDirectory mDirectory;
+    bool mIsPartitionLevel = false;
     size_t mIndex = 0;
     std::regex mFindMask;
 };
 
 class cFiryPluginData {
 
+    // The container currently loaded (an ADF/D64/FAT/ISO9660/DMS image, or
+    // the .hdf a partitioned image was found in).
     firy::spImage mImage;
     std::wstring mImagePath;
     size_t mLastError;
+
+    // RDB-partitioned .hdf support: LoadFile() populates mPartitions when
+    // an RDB is found. Until a specific partition name is navigated into,
+    // browsing sees mPartitions as a virtual folder listing rather than a
+    // real firy image (mImage stays null in that case).
+    bool mIsPartitioned = false;
+    std::vector<sPartitionInfo> mPartitions;
+    firy::spImage mPartitionImage;
+    std::string mActivePartition;
 
 protected:
 
     LPVFSFILEDATAHEADER GetVFSforEntry(const firy::spNode& pEntry, HANDLE pHeap);
     void GetWfdForEntry(const firy::spNode& pEntry, LPWIN32_FIND_DATA pData);
 
+    LPVFSFILEDATAHEADER GetVFSforPartition(const sPartitionInfo& pPart, HANDLE pHeap);
+    void GetWfdForPartition(const sPartitionInfo& pPart, LPWIN32_FIND_DATA pData);
+
     FILETIME GetFileTime(const firy::helpers::sDateTime& pDT);
     firy::helpers::sDateTime ToDateTime(FILETIME pFT);
 
     bool LoadFile(const std::wstring& pPath);
+    bool OpenPartition(const std::string& pName);
+
+    // Resolves a full VFS path down to (the firy image responsible for it,
+    // the path inside that image). If pPath names the RDB partition-list
+    // level itself (an .hdf with no partition segment navigated into yet),
+    // pOutImage comes back null and the caller is expected to work with
+    // mPartitions directly. Returns false only on an outright failure to
+    // load/navigate (missing/corrupt file, unknown partition name, ...).
+    bool ResolveImage(const std::wstring& pPath, firy::spImage& pOutImage, std::string& pOutInner);
 
     std::wstring GetInnerPath(const std::wstring& pPath);
     std::string InnerPathUtf8(const std::wstring& pPath);

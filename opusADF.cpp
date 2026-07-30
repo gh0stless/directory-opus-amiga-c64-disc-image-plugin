@@ -113,9 +113,49 @@ LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforEntry(const firy::spNode& pEntry, 
     return lpFDH;
 }
 
+void cFiryPluginData::GetWfdForPartition(const sPartitionInfo& pPart, LPWIN32_FIND_DATA pData) {
+    auto filename = s2ws(pPart.mName);
+    StringCchCopyW(pData->cFileName, MAX_PATH, filename.c_str());
+
+    pData->nFileSizeHigh = 0;
+    pData->nFileSizeLow = 0;
+    pData->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+
+    pData->dwReserved0 = 0;
+    pData->dwReserved1 = 0;
+
+    pData->ftCreationTime = {};
+    pData->ftLastAccessTime = {};
+    pData->ftLastWriteTime = {};
+}
+
+LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforPartition(const sPartitionInfo& pPart, HANDLE pHeap) {
+    LPVFSFILEDATAHEADER lpFDH;
+
+    if (lpFDH = (LPVFSFILEDATAHEADER)HeapAlloc(pHeap, 0, sizeof(VFSFILEDATAHEADER) + sizeof(VFSFILEDATA))) {
+        LPVFSFILEDATA lpFD = (LPVFSFILEDATA)(lpFDH + 1);
+
+        lpFDH->cbSize = sizeof(VFSFILEDATAHEADER);
+        lpFDH->lpNext = 0;
+        lpFDH->iNumItems = 1;
+        lpFDH->cbFileDataSize = sizeof(VFSFILEDATA);
+
+        lpFD->dwFlags = 0;
+        lpFD->lpszComment = 0;
+        lpFD->iNumColumns = 0;
+        lpFD->lpvfsColumnData = 0;
+
+        GetWfdForPartition(pPart, &lpFD->wfdData);
+    }
+
+    return lpFDH;
+}
+
 /**
  * Split a full VFS path into the on-disk image file and the path inside it,
- * by looking for the earliest occurrence of any extension firy knows about.
+ * by looking for the earliest occurrence of any extension firy knows about
+ * (plus .dms, which firy doesn't know). Also checks for an RDB partition
+ * table, since real .hdf files almost always have one.
  */
 bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     std::wstring Lower = pPath;
@@ -149,8 +189,25 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
 
     std::wstring ImagePath = pPath.substr(0, BestEnd);
 
-    if (mImage && mImagePath == ImagePath)
+    if ((mImage || mIsPartitioned) && mImagePath == ImagePath)
         return true;
+
+    mImage.reset();
+    mIsPartitioned = false;
+    mPartitions.clear();
+    mPartitionImage.reset();
+    mActivePartition.clear();
+
+    // Real hard-disk images are almost always RDB-partitioned (unlike
+    // floppy .adf images), so check for that first regardless of
+    // extension - it's cheap (a handful of small reads).
+    auto partitions = ParseRDB(ws2s(ImagePath));
+    if (!partitions.empty()) {
+        mIsPartitioned = true;
+        mPartitions = std::move(partitions);
+        mImagePath = ImagePath;
+        return true;
+    }
 
     firy::spImage image;
 
@@ -176,6 +233,59 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
 
     mImage = image;
     mImagePath = ImagePath;
+    return true;
+}
+
+bool cFiryPluginData::OpenPartition(const std::string& pName) {
+    if (mPartitionImage && mActivePartition == pName)
+        return true;
+
+    for (auto& part : mPartitions) {
+        if (part.mName != pName)
+            continue;
+
+        auto source = std::make_shared<cOffsetSource>(ws2s(mImagePath), part.mOffset, part.mSize);
+        auto image = firy::gFiry->openImageFile<firy::images::cADF>(source);
+        if (!image)
+            return false;
+
+        mPartitionImage = image;
+        mActivePartition = pName;
+        return true;
+    }
+
+    return false;
+}
+
+bool cFiryPluginData::ResolveImage(const std::wstring& pPath, firy::spImage& pOutImage, std::string& pOutInner) {
+    if (!LoadFile(pPath))
+        return false;
+
+    if (!mIsPartitioned) {
+        pOutImage = mImage;
+        pOutInner = InnerPathUtf8(pPath);
+        return true;
+    }
+
+    auto inner = GetInnerPath(pPath);
+    auto depth = tokenize(inner, L"/");
+
+    if (depth.empty()) {
+        // The .hdf root itself - the caller works with mPartitions directly.
+        pOutImage.reset();
+        pOutInner.clear();
+        return true;
+    }
+
+    if (!OpenPartition(ws2s(depth[0])))
+        return false;
+
+    std::wstring rest;
+    for (size_t i = 1; i < depth.size(); i++)
+        rest += L"/" + depth[i];
+
+    pOutImage = mPartitionImage;
+    pOutInner = ws2s(rest);
     return true;
 }
 
@@ -208,10 +318,33 @@ bool cFiryPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
         return false;
     }
 
-    if (!LoadFile(lpRDD->lpszPath))
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(lpRDD->lpszPath, image, inner))
         return false;
 
-    auto dir = mImage->filesystemPath(InnerPathUtf8(lpRDD->lpszPath));
+    if (!image) {
+        // RDB partition-list level: list mPartitions as folders.
+        if (lpRDD->vfsReadOp == VFSREAD_CHANGEDIR)
+            return true;
+
+        LPVFSFILEDATAHEADER lpLastHeader = 0;
+        for (auto& part : mPartitions) {
+            LPVFSFILEDATAHEADER lpFDH = GetVFSforPartition(part, lpRDD->hMemHeap);
+
+            if (lpFDH) {
+                if (lpLastHeader)
+                    lpLastHeader->lpNext = lpFDH;
+                else
+                    lpRDD->lpFileData = lpFDH;
+
+                lpLastHeader = lpFDH;
+            }
+        }
+        return true;
+    }
+
+    auto dir = image->filesystemPath(inner);
     if (!dir)
         return false;
 
@@ -257,10 +390,12 @@ bool cFiryPluginData::ReadFile(HANDLE hFile, size_t pBytes, std::uint8_t* pBuffe
 
 HANDLE cFiryPluginData::OpenFile(std::wstring pPath) {
 
-    if (!LoadFile(pPath))
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pPath, image, inner) || !image)
         return 0;
 
-    auto file = mImage->filesystemFile(InnerPathUtf8(pPath));
+    auto file = image->filesystemFile(inner);
     if (!file)
         return 0;
 
@@ -277,10 +412,15 @@ void cFiryPluginData::CloseFile(HANDLE hFile) {
 
 int cFiryPluginData::ContextVerb(LPVFSCONTEXTVERBDATAW lpVerbData) {
 
-    if (!LoadFile(lpVerbData->lpszPath))
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(lpVerbData->lpszPath, image, inner))
         return VFSCVRES_FAIL;
 
-    auto node = mImage->filesystemNode(InnerPathUtf8(lpVerbData->lpszPath));
+    if (!image)
+        return VFSCVRES_DEFAULT; // the .hdf/partition-list level is always a folder
+
+    auto node = image->filesystemNode(inner);
     if (!node)
         return VFSCVRES_FAIL;
 
@@ -293,10 +433,12 @@ int cFiryPluginData::Delete(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPa
     if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
         return 1;
 
-    if (!LoadFile(pFile))
-        return 1;
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner) || !image)
+        return 1; // can't delete a partition itself
 
-    auto node = mImage->filesystemNode(InnerPathUtf8(pFile));
+    auto node = image->filesystemNode(inner);
     if (!node)
         return 1;
 
@@ -315,34 +457,56 @@ cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA
 
     cFiryFindData* findData = new cFiryFindData();
 
-    if (LoadFile(lpszPath)) {
+    if (!LoadFile(lpszPath))
+        return findData;
 
-        auto Inner = GetInnerPath(lpszPath);
-        auto Depth = tokenize(Inner, L"/");
+    auto Inner = GetInnerPath(lpszPath);
+    auto Depth = tokenize(Inner, L"/");
 
-        std::wstring FileMask = Depth.empty() ? L"" : Depth.back();
-        if (!Depth.empty())
-            Depth.pop_back();
+    std::wstring FileMask = Depth.empty() ? L"" : Depth.back();
+    if (!Depth.empty())
+        Depth.pop_back();
 
-        std::wstring ParentInner;
-        for (auto& Seg : Depth)
-            ParentInner += L"/" + Seg;
-        if (ParentInner.empty())
-            ParentInner = L"/";
+    // Rebuild the parent's full VFS path so ResolveImage() can navigate it
+    // the same way as everywhere else (transparently handles the
+    // partition-list level too).
+    std::wstring ParentPath = mImagePath;
+    for (auto& Seg : Depth)
+        ParentPath += L"\\" + Seg;
 
-        auto parentDir = mImage->filesystemPath(ws2s(ParentInner));
-        if (parentDir) {
-            findData->mDirectory = parentDir;
-            findData->mFindMask = std::regex("(." + ws2s(FileMask) + ")");
+    firy::spImage image;
+    std::string parentInner;
+    if (!ResolveImage(ParentPath, image, parentInner))
+        return findData;
 
-            while (findData->mIndex < parentDir->mNodes.size()) {
-                auto& node = parentDir->mNodes[findData->mIndex];
-                findData->mIndex++;
+    findData->mFindMask = std::regex("(." + ws2s(FileMask) + ")");
 
-                if (std::regex_match(node->nameGet(), findData->mFindMask)) {
-                    GetWfdForEntry(node, lpwfdData);
-                    break;
-                }
+    if (!image) {
+        findData->mIsPartitionLevel = true;
+
+        while (findData->mIndex < mPartitions.size()) {
+            auto& part = mPartitions[findData->mIndex];
+            findData->mIndex++;
+
+            if (std::regex_match(part.mName, findData->mFindMask)) {
+                GetWfdForPartition(part, lpwfdData);
+                break;
+            }
+        }
+        return findData;
+    }
+
+    auto parentDir = image->filesystemPath(parentInner);
+    if (parentDir) {
+        findData->mDirectory = parentDir;
+
+        while (findData->mIndex < parentDir->mNodes.size()) {
+            auto& node = parentDir->mNodes[findData->mIndex];
+            findData->mIndex++;
+
+            if (std::regex_match(node->nameGet(), findData->mFindMask)) {
+                GetWfdForEntry(node, lpwfdData);
+                break;
             }
         }
     }
@@ -351,6 +515,19 @@ cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA
 }
 
 bool cFiryPluginData::FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA lpwfdData) {
+
+    if (pFindData->mIsPartitionLevel) {
+        while (pFindData->mIndex < mPartitions.size()) {
+            auto& part = mPartitions[pFindData->mIndex];
+            pFindData->mIndex++;
+
+            if (std::regex_match(part.mName, pFindData->mFindMask)) {
+                GetWfdForPartition(part, lpwfdData);
+                return true;
+            }
+        }
+        return false;
+    }
 
     if (!pFindData->mDirectory)
         return false;
@@ -385,14 +562,16 @@ int cFiryPluginData::ImportFile(LPVFSBATCHDATAW lpBatchData, const std::wstring&
 
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)content->size());
 
-    if (!LoadFile(pFile))
-        return 1;
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner) || !image)
+        return 1; // can't import directly onto the partition-list level
 
-    auto parentDir = mImage->filesystemPath(InnerPathUtf8(pFile));
+    auto parentDir = image->filesystemPath(inner);
     if (!parentDir)
         return 1;
 
-    auto newFile = mImage->filesystemFileCreate(ws2s(ItemName));
+    auto newFile = image->filesystemFileCreate(ws2s(ItemName));
     if (!newFile)
         return 1;
 
@@ -457,14 +636,16 @@ int cFiryPluginData::ImportPath(LPVFSBATCHDATAW lpBatchData, const std::wstring&
     auto Depth = tokenize(pPath, L"\\/");
     std::wstring DirName = Depth.empty() ? pPath : Depth.back();
 
-    if (!LoadFile(pFile))
-        return 1;
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner) || !image)
+        return 1; // can't create a folder directly on the partition-list level
 
-    auto parentDir = mImage->filesystemPath(InnerPathUtf8(pFile));
+    auto parentDir = image->filesystemPath(inner);
     if (!parentDir)
         return 1;
 
-    auto newDir = mImage->filesystemDirectoryCreate(ws2s(DirName));
+    auto newDir = image->filesystemDirectoryCreate(ws2s(DirName));
     if (!newDir)
         // Filesystem doesn't support sub-directories (eg. a flat C64 disk)
         return 1;
@@ -532,14 +713,30 @@ int cFiryPluginData::ExtractFile(LPVFSBATCHDATAW lpBatchData, const firy::spNode
 
 int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pDest) {
 
-    if (!LoadFile(pPath))
-        return 1;
-
-    auto dir = mImage->filesystemPath(InnerPathUtf8(pPath));
-    if (!dir)
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pPath, image, inner))
         return 1;
 
     int result = 0;
+
+    if (!image) {
+        // Extracting the .hdf root: recurse into each partition.
+        for (auto& part : mPartitions) {
+            std::wstring ChildPath = pPath;
+            if (ChildPath[ChildPath.size() - 1] != L'\\')
+                ChildPath += L"\\";
+            ChildPath += s2ws(part.mName);
+
+            result |= Extract(lpBatchData, ChildPath, pDest);
+        }
+        return result;
+    }
+
+    auto dir = image->filesystemPath(inner);
+    if (!dir)
+        return 1;
+
     for (auto& node : dir->mNodes) {
 
         std::wstring ChildPath = pPath;
@@ -559,11 +756,9 @@ int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pF
     if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
         return 1;
 
-    if (!LoadFile(pFile))
-        return 1;
-
-    auto node = mImage->filesystemNode(InnerPathUtf8(pFile));
-    if (!node)
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner))
         return 1;
 
     auto Depth = tokenize(pFile, L"\\/");
@@ -573,6 +768,19 @@ int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pF
     if (FinalName[FinalName.size() - 1] != '\\')
         FinalName += '\\';
     FinalName += ItemName;
+
+    if (!image) {
+        // A partition, presented as a folder - recurse the same way a
+        // real directory would.
+        CreateDirectory(FinalName.c_str(), 0);
+        int result = ExtractPath(lpBatchData, pFile, FinalName);
+        DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_NEXTFILE, 0);
+        return result;
+    }
+
+    auto node = image->filesystemNode(inner);
+    if (!node)
+        return 1;
 
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)ItemName.c_str());
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)node->sizeInBytesGet());
@@ -600,18 +808,37 @@ int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pF
 
 size_t cFiryPluginData::TotalFreeBlocks(const std::wstring& pFile) {
 
-    if (!LoadFile(pFile))
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner))
         return 0;
 
-    return mImage->filesystemTotalBytesFree();
+    if (image)
+        return image->filesystemTotalBytesFree();
+
+    // .hdf root: sum free space across every partition.
+    size_t free = 0;
+    for (auto& part : mPartitions) {
+        if (OpenPartition(part.mName))
+            free += mPartitionImage->filesystemTotalBytesFree();
+    }
+    return free;
 }
 
 size_t cFiryPluginData::TotalDiskBlocks(const std::wstring& pFile) {
 
-    if (!LoadFile(pFile))
+    firy::spImage image;
+    std::string inner;
+    if (!ResolveImage(pFile, image, inner))
         return 0;
 
-    return mImage->filesystemTotalBytesMax();
+    if (image)
+        return image->filesystemTotalBytesMax();
+
+    size_t total = 0;
+    for (auto& part : mPartitions)
+        total += part.mSize;
+    return total;
 }
 
 UINT cFiryPluginData::BatchOperation(LPTSTR lpszPath, LPVFSBATCHDATAW lpBatchData) {

@@ -37,6 +37,8 @@ typedef const BYTE *LPCBYTE;
 #include "images/iso9660.hpp"
 
 #include "memorysource.hpp"
+#include "offsetsource.hpp"
 #include "dms.hpp"
+#include "rdb.hpp"
 
 #include "opusADF.hpp"

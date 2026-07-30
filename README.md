@@ -12,6 +12,17 @@ firy as a `cMemorySource` - firy itself has no idea DMS exists. The decoder
 compression modes (RLE/Quick/Medium/Deep/Heavy1/Heavy2). Encrypted archives
 aren't supported (no password prompt in this VFS plugin).
 
+Real .hdf hard-disk images almost always carry an RDB (Rigid Disk Block)
+partition table rather than a plain AmigaDOS boot block at byte 0 - firy's
+`cADF` doesn't know RDB exists either, so `rdb.hpp`/`rdb.cpp` parses it
+ourselves (RigidDiskBlock/PartitionBlock/DosEnvec, checksummed the same way
+AmigaDOS does) and every AmigaDOS partition found shows up as a folder at
+the .hdf's root. Picking a partition hands firy a `cOffsetSource`
+(`offsetsource.hpp`) - a byte-range window into the real .hdf file at that
+partition's offset - so a multi-gigabyte hard disk image is never fully
+loaded into memory, unlike the DMS path. Non-AmigaDOS partitions (PFS, SFS,
+...) are skipped; firy couldn't read them anyway.
+
 Fork of [segrax/directory_opus_amiga_plugin](https://github.com/segrax/directory_opus_amiga_plugin)
 (ADFlib-based, Amiga-only, unmaintained since 2019). ADFlib has been replaced
 with firy; extension list and image detection now come from firy directly, so
