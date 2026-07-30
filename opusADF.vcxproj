@@ -181,6 +181,8 @@
     <ClInclude Include="headers\plugin support.h" />
     <ClInclude Include="headers\vfs plugins.h" />
     <ClInclude Include="headers\viewer plugins.h" />
+    <ClInclude Include="dms.hpp" />
+    <ClInclude Include="memorysource.hpp" />
     <ClInclude Include="opusADF.hpp" />
     <ClInclude Include="stdafx.h" />
   </ItemGroup>
@@ -201,6 +203,7 @@
     <ClCompile Include="..\firy\source\sources\source.cpp" />
     <ClCompile Include="..\firy\source\sources\sourcefile.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="dms.cpp" />
     <ClCompile Include="opusADF.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>

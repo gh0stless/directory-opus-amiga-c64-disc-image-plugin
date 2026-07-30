@@ -121,10 +121,17 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     std::wstring Lower = pPath;
     std::transform(Lower.begin(), Lower.end(), Lower.begin(), ::towlower);
 
+    // Extensions firy can open directly, plus .dms, which we unpack to an
+    // in-memory ADF ourselves before handing it to firy (firy doesn't know
+    // about DMS and isn't touched to teach it).
+    auto Extensions = firy::cFiry::getKnownExtensions();
+    Extensions.push_back("dms");
+
     size_t BestPos = std::wstring::npos;
     size_t BestEnd = std::wstring::npos;
+    std::wstring BestExt;
 
-    for (auto& ext : firy::cFiry::getKnownExtensions()) {
+    for (auto& ext : Extensions) {
         std::wstring DotExt = L"." + s2ws(ext);
         size_t Pos = Lower.find(DotExt);
         if (Pos == std::wstring::npos)
@@ -133,6 +140,7 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
         if (BestPos == std::wstring::npos || Pos < BestPos) {
             BestPos = Pos;
             BestEnd = Pos + DotExt.size();
+            BestExt = s2ws(ext);
         }
     }
 
@@ -144,7 +152,25 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     if (mImage && mImagePath == ImagePath)
         return true;
 
-    auto image = firy::gFiry->openImage(ws2s(ImagePath));
+    firy::spImage image;
+
+    if (BestExt == L"dms") {
+        auto raw = firy::gResources->FileRead(ws2s(ImagePath));
+        if (!raw)
+            return false;
+
+        std::vector<uint8_t> rawBytes(raw->data(), raw->data() + raw->size());
+        auto adfBytes = DecompressDMS(rawBytes);
+        if (adfBytes.empty())
+            return false;
+
+        auto source = std::make_shared<cMemorySource>(std::move(adfBytes));
+        image = firy::gFiry->openImageFile<firy::images::cADF>(source);
+    }
+    else {
+        image = firy::gFiry->openImage(ws2s(ImagePath));
+    }
+
     if (!image)
         return false;
 

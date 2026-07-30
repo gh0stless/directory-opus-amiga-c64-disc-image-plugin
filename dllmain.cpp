@@ -64,10 +64,11 @@ bool VFS_IdentifyW(LPVFSPLUGININFOW lpVFSInfo) {
             Extensions += L";";
         Extensions += L"." + s2ws(ext);
     }
+    Extensions += L";.dms"; // unpacked to an in-memory ADF ourselves, firy doesn't know DMS
 
     StringCchCopyW(lpVFSInfo->lpszHandleExts, lpVFSInfo->cchHandleExtsMax, Extensions.c_str());
     StringCchCopyW(lpVFSInfo->lpszName, lpVFSInfo->cchNameMax, L"Amiga/C64 Disk Images (firy)");
-    StringCchCopyW(lpVFSInfo->lpszDescription, lpVFSInfo->cchDescriptionMax, L"Amiga (ADF/HDF), Commodore 64 (D64/D71/D81) and FAT/ISO9660 disk image support");
+    StringCchCopyW(lpVFSInfo->lpszDescription, lpVFSInfo->cchDescriptionMax, L"Amiga (ADF/HDF/DMS), Commodore 64 (D64/D71/D81) and FAT/ISO9660 disk image support");
     StringCchCopyW(lpVFSInfo->lpszCopyright, lpVFSInfo->cchCopyrightMax, L"(c) Copyright 2026");
     StringCchCopyW(lpVFSInfo->lpszURL, lpVFSInfo->cchURLMax, L"github.com/segrax/firy");
 
