@@ -1,4 +1,4 @@
-# diropus-amiga-c64-disc-files-plugin
+# diropus-amiga-c64-disc-image-plugin
 
 **Status: v0.1.0 (beta)**
 
@@ -52,7 +52,7 @@ with firy.
 ## Building
 
 ```
-git clone https://github.com/gh0stless/diropus-amiga-c64-disc-files-plugin.git
+git clone https://github.com/gh0stless/diropus-amiga-c64-disc-image-plugin.git
 git clone https://github.com/segrax/firy.git
 ```
 
