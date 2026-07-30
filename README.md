@@ -1,9 +1,24 @@
-# Directory Opus Amiga/C64 Disk Image Plugin
+# diropus-amiga-c64-disc-files-plugin
+
+**Status: v0.1.0 (beta)**
 
 VFS plugin for Directory Opus that browses disk images directly in the
 Lister: Amiga (ADF/FDI/HDF/DMS), Commodore 64 (D64/D71/D81), FAT12/16/32 and
 ISO9660 - whatever [firy](https://github.com/segrax/firy) supports, since it
 does the actual image parsing.
+
+## Features
+
+* Browse, read, delete and import files/folders inside disk images, same as
+  a real folder in the Lister
+* Amiga: `.adf` / `.fdi` / `.hdf` (including RDB-partitioned hard disk
+  images, multiple partitions shown as folders) and `.dms` archives
+* Commodore 64: `.d64` / `.d71` / `.d81`
+* Bonus, courtesy of firy: FAT12/16/32 (`.img`/`.ima`) and ISO9660 (`.iso`)
+* New disk formats firy adds show up automatically - the extension list and
+  image detection come straight from firy, not a hardcoded list here
+
+## How it works
 
 DMS (DiskMasher) archives are unpacked to an in-memory ADF and handed to
 firy as a `cMemorySource` - firy itself has no idea DMS exists. The decoder
@@ -25,14 +40,34 @@ loaded into memory, unlike the DMS path. Non-AmigaDOS partitions (PFS, SFS,
 
 Fork of [segrax/directory_opus_amiga_plugin](https://github.com/segrax/directory_opus_amiga_plugin)
 (ADFlib-based, Amiga-only, unmaintained since 2019). ADFlib has been replaced
-with firy; extension list and image detection now come from firy directly, so
-new formats firy adds show up here without code changes.
+with firy.
 
-Supports directory listing, reading, deleting, and importing files/folders,
-mirroring the feature set of the original ADFlib-based plugin.
-
-#### Requirements
+## Requirements
 
 * Directory Opus for Windows
 * [firy](https://github.com/segrax/firy) checked out as a sibling folder
   (`../firy`) - built directly into this plugin, not vendored in this repo
+* Visual Studio 2019 or newer (v142+ toolset), C++17
+
+## Building
+
+```
+git clone https://github.com/gh0stless/diropus-amiga-c64-disc-files-plugin.git
+git clone https://github.com/segrax/firy.git
+```
+
+with both checked out next to each other, open `opusADF.sln` and build
+`Release|x64`. Output is `x64\Release\opusAmigaDisc.dll`.
+
+## Installing
+
+Copy `opusAmigaDisc.dll` into Directory Opus's `VFSPlugins` folder (usually
+`C:\Program Files\GPSoftware\Directory Opus\VFSPlugins`), then restart Opus
+or refresh plugins.
+
+## Known limitations (beta)
+
+* Encrypted DMS archives aren't supported
+* No UI for creating a partitioned .hdf or an RDB from scratch (read/import/
+  delete into existing partitions works)
+* Rename and SetAttr aren't implemented
