@@ -27,6 +27,47 @@ std::string ws2s(const std::wstring& wstr) {
     return result;
 }
 
+/**
+ * Builds a safe regex from a DOS-style wildcard mask (only '*' and '?' are
+ * treated specially, everything else - including regex metacharacters that
+ * are common in real Amiga filenames like '(', ')', '+', '[' - is escaped
+ * literally). Never throws: a name is not a trusted regex pattern, unlike
+ * the previous "(." + name + ")" construction which could take an
+ * std::regex_error straight across the DLL boundary into Opus on a name
+ * like "Setup(Beta" or "C++". Also fixes exact (non-wildcard) lookups,
+ * which the old "always one leading char" pattern could never match.
+ */
+std::regex BuildWildcardRegex(const std::wstring& pMask) {
+    std::string pattern = "^";
+
+    for (char ch : ws2s(pMask)) {
+        if (ch == '*') {
+            pattern += ".*";
+        }
+        else if (ch == '?') {
+            pattern += '.';
+        }
+        else if (strchr(".^$|()[]{}+\\", ch)) {
+            pattern += '\\';
+            pattern += ch;
+        }
+        else {
+            pattern += ch;
+        }
+    }
+
+    pattern += "$";
+
+    try {
+        return std::regex(pattern, std::regex::icase);
+    }
+    catch (const std::regex_error&) {
+        // Should be unreachable given the escaping above, but never let a
+        // malformed mask take the whole process down.
+        return std::regex(std::string());
+    }
+}
+
 std::vector<std::wstring> tokenize(const std::wstring& in, const std::wstring& delim) {
     std::vector<std::wstring> tokens;
 
@@ -479,7 +520,7 @@ cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA
     if (!ResolveImage(ParentPath, image, parentInner))
         return findData;
 
-    findData->mFindMask = std::regex("(." + ws2s(FileMask) + ")");
+    findData->mFindMask = BuildWildcardRegex(FileMask);
 
     if (!image) {
         findData->mIsPartitionLevel = true;

@@ -50,7 +50,10 @@ std::vector<sPartitionInfo> ParseRDB(const std::string& pFilePath) {
         return result;
 
     uint32_t blockBytes = ReadBE32(rdb.data() + 16); // rdb_BlockBytes
-    if (blockBytes < 128 || blockBytes >(uint32_t)(16 * 1024 * 1024))
+    // PartitionBlock's used fields run up to offset 196 (pb_Environment[16]);
+    // anything smaller and reading them below would run past the block we
+    // actually fetched from disk. 256 gives a clean margin.
+    if (blockBytes < 256 || blockBytes >(uint32_t)(16 * 1024 * 1024))
         return result; // sanity check against a corrupt/garbage block that happened to start with "RDSK"
 
     int32_t partitionBlock = (int32_t)ReadBE32(rdb.data() + 28); // rdb_PartitionList
