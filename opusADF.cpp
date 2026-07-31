@@ -7,13 +7,32 @@
 
 DOpusPluginHelperFunction DOpus;
 
+// Converts a narrow string coming out of firy - always raw bytes read
+// straight off a disk image (a filename, a partition name, or a path built
+// by concatenating those) - into the wide string Opus expects.
+//
+// This is NOT UTF-8. Amiga filenames are native single-byte text: the
+// Amiga's own character set is ISO-8859-1/Latin-1 for the accented range
+// (confirmed against firy's cADF entry parser, which just memcpy's the raw
+// on-disk name bytes into a std::string with no charset conversion of its
+// own - see adf.cpp's node name assignment). Standard Commodore PETSCII, as
+// used by D64/D71/D81, has no umlaut characters in its filename charset at
+// all in practice, so there's no "correct" table entry for those bytes
+// either way - decoding them as Latin-1 as well is at least a harmless,
+// well-defined choice for the rare/nonstandard disk that has one, rather
+// than a wrong one.
+//
+// Because ISO-8859-1's 256 code points map 1:1 onto Unicode's first 256
+// code points, "decoding" it is just a per-byte widen - no codepage
+// table/API lookup needed, and (unlike the previous CP_UTF8 decode this
+// replaced) it can never fail or produce U+FFFD replacement characters: a
+// German umlaut byte like 0xE4 ('ä') used to be an invalid lone UTF-8
+// continuation byte and got mangled; here it directly becomes L'ä'.
 std::wstring s2ws(const std::string& str) {
-    if (str.empty())
-        return std::wstring();
-
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), 0, 0);
-    std::wstring result(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &result[0], len);
+    std::wstring result;
+    result.reserve(str.size());
+    for (unsigned char c : str)
+        result.push_back(static_cast<wchar_t>(c));
     return result;
 }
 
