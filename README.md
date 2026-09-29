@@ -1,6 +1,6 @@
 # diropus-amiga-c64-disc-image-plugin
 
-**Status: v0.1.0 (beta)**
+**Status: v0.1.0 (beta 4)**
 
 VFS plugin for Directory Opus that browses disk images directly in the
 Lister: Amiga (ADF/FDI/HDF/DMS), Commodore 64 (D64/D71/D81), FAT12/16/32 and
@@ -52,11 +52,15 @@ with firy.
 ## Building
 
 ```
-git clone https://github.com/gh0stless/diropus-amiga-c64-disc-image-plugin.git
+git clone https://github.com/gh0stless/directory-opus-amiga-c64-disc-image-plugin.git
 git clone https://github.com/segrax/firy.git
+git -C firy apply ../directory-opus-amiga-c64-disc-image-plugin/patches/firy-d64-accept-any-dos-type.patch
 ```
 
-with both checked out next to each other, open `opusADF.sln` and build
+The patch in `patches/` fixes a firy bug that refused to open D64/D71/D81
+images whose disk DOS type isn't the stock `2A`/`3D`; release builds include it.
+
+With both checked out next to each other, open `opusADF.sln` and build
 `Release|x64`. Output is `x64\Release\opusAmigaDisc.dll`.
 
 ## Installing
