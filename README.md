@@ -1,6 +1,6 @@
 # diropus-amiga-c64-disc-image-plugin
 
-**Status: v0.1.0 (beta 4)**
+**Status: development branch** - beta 6 plus write support (see "Writing into images")
 
 VFS plugin for Directory Opus that browses disk images directly in the
 Lister: Amiga (ADF/FDI/HDF/DMS), Commodore 64 (D64/D71/D81), FAT12/16/32 and
@@ -35,12 +35,13 @@ Real .hdf hard-disk images almost always carry an RDB (Rigid Disk Block)
 partition table rather than a plain AmigaDOS boot block at byte 0 - firy's
 `cADF` doesn't know RDB exists either, so `rdb.hpp`/`rdb.cpp` parses it
 ourselves (RigidDiskBlock/PartitionBlock/DosEnvec, checksummed the same way
-AmigaDOS does) and every AmigaDOS partition found shows up as a folder at
-the .hdf's root. Picking a partition hands firy a `cOffsetSource`
-(`offsetsource.hpp`) - a byte-range window into the real .hdf file at that
-partition's offset - so a multi-gigabyte hard disk image is never fully
-loaded into memory, unlike the DMS path. Non-AmigaDOS partitions (PFS, SFS,
-...) are skipped; firy couldn't read them anyway.
+AmigaDOS does) and every partition found shows up as a folder at the .hdf's
+root. Picking a partition hands firy a `cOffsetSource` (`offsetsource.hpp`) -
+a byte-range window into the real .hdf file at that partition's offset - so
+a multi-gigabyte hard disk image is never fully loaded into memory, unlike
+the DMS path. Non-AmigaDOS partitions (PFS, SFS, ...) are listed with their
+filesystem in the Description column but can't be opened, since firy can't
+read them.
 
 Fork of [segrax/directory_opus_amiga_plugin](https://github.com/segrax/directory_opus_amiga_plugin)
 (ADFlib-based, Amiga-only, unmaintained since 2019). ADFlib has been replaced
@@ -101,6 +102,10 @@ directory and file chains) plus the `d64` Python package for CBM disks. See
 
 ## Known limitations (beta)
 
+* Only AmigaDOS (OFS/FFS) partitions can be opened. Partitions with other
+  filesystems - PFS3 (used by AmigaVision, for example), SFS, ... - are
+  listed with a note in the Description column, but can't be opened yet.
+  PFS3 read support is planned.
 * Encrypted DMS archives aren't supported
 * No UI for creating a partitioned .hdf or an RDB from scratch (read/import/
   delete into existing partitions works)

@@ -20,10 +20,18 @@
  */
 struct sPartitionInfo {
     std::string mName;
-    size_t mOffset; // byte offset of this partition within the .hdf file
-    size_t mSize;   // byte length of this partition
+    size_t mOffset;     // byte offset of this partition within the .hdf file
+    size_t mSize;       // byte length of this partition
+    uint32_t mDosType;  // de_DosType, eg. 0x444f5301 "DOS\1" (FFS), 0x50465303 "PFS\3"
+
+    // AmigaDOS (OFS/FFS) - the only filesystems firy can read
+    bool isSupported() const { return (mDosType & 0xffffff00) == 0x444f5300; }
+
+    // eg. "PFS3", "SFS0", "DOS1"
+    std::string dosTypeName() const;
 };
 
-// Returns the AmigaDOS ("DOS\x") partitions described by the RDB at the
-// start of pFilePath, or an empty vector if there's no valid RDB there.
+// Returns every partition described by the RDB at the start of pFilePath
+// (including ones with filesystems firy can't read, so they can at least be
+// shown), or an empty vector if there's no valid RDB there.
 std::vector<sPartitionInfo> ParseRDB(const std::string& pFilePath);
