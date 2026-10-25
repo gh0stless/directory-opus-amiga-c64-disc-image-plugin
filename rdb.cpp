@@ -27,6 +27,18 @@ namespace {
 
 }
 
+std::string sPartitionInfo::dosTypeName() const {
+    std::string result;
+    for (int shift = 24; shift >= 8; shift -= 8) {
+        char ch = (char)((mDosType >> shift) & 0xff);
+        result += (ch >= 0x20 && ch < 0x7f) ? ch : '?';
+    }
+    // The last byte is a version number (DOS\1, PFS\3), not a letter
+    uint8_t last = (uint8_t)(mDosType & 0xff);
+    result += (last < 10) ? (char)('0' + last) : ((last >= 0x20 && last < 0x7f) ? (char)last : '?');
+    return result;
+}
+
 std::vector<sPartitionInfo> ParseRDB(const std::string& pFilePath) {
     std::vector<sPartitionInfo> result;
 
@@ -88,14 +100,16 @@ std::vector<sPartitionInfo> ParseRDB(const std::string& pFilePath) {
         uint64_t startBlock = (uint64_t)lowCyl * cylBlocks;
         uint64_t blockCount = highCyl >= lowCyl ? ((uint64_t)highCyl - lowCyl + 1) * cylBlocks : 0;
 
-        // Only AmigaDOS filesystems ("DOS\0".."DOS\7", international/
-        // dircache variants) - firy's cADF can't read PFS/SFS/other
-        // third-party filesystems anyway.
-        if ((dosType & 0xffffff00) == 0x444f5300 && blockCount > 0) {
+        // Every partition is listed, including PFS/SFS/other third-party
+        // filesystems firy can't read - those show up but can't be opened,
+        // rather than the whole image failing to open when it has no
+        // AmigaDOS partition at all.
+        if (blockCount > 0) {
             sPartitionInfo info;
             info.mName = name.empty() ? ("Partition" + std::to_string(result.size() + 1)) : name;
             info.mOffset = (size_t)(startBlock * blockBytes);
             info.mSize = (size_t)(blockCount * blockBytes);
+            info.mDosType = dosType;
             result.push_back(info);
         }
 

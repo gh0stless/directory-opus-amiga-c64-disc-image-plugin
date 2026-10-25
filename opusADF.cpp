@@ -285,6 +285,16 @@ LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforPartition(const sPartitionInfo& pP
         lpFD->iNumColumns = 0;
         lpFD->lpvfsColumnData = 0;
 
+        // Say why a partition can't be opened (shown in Opus' Description column)
+        if (!pPart.isSupported()) {
+            auto comment = s2ws(pPart.dosTypeName()) + L" filesystem - not supported yet";
+            size_t bytes = (comment.size() + 1) * sizeof(wchar_t);
+            if (auto text = (LPWSTR)HeapAlloc(pHeap, 0, bytes)) {
+                memcpy(text, comment.c_str(), bytes);
+                lpFD->lpszComment = text;
+            }
+        }
+
         GetWfdForPartition(pPart, &lpFD->wfdData);
     }
 
@@ -396,6 +406,10 @@ bool cFiryPluginData::OpenPartition(const std::string& pName) {
     for (auto& part : mPartitions) {
         if (part.mName != pName)
             continue;
+
+        // Listed, but firy can only read AmigaDOS (OFS/FFS) partitions
+        if (!part.isSupported())
+            return false;
 
         auto source = std::make_shared<cOffsetSource>(HostPath(mImagePath), part.mOffset, part.mSize);
         auto image = firy::gFiry->openImageFile<firy::images::cADF>(source);
