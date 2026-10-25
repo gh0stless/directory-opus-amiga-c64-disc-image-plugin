@@ -1,0 +1,1220 @@
+From ab4bf1fc4523656aec1371d8952d940e01f54ca9 Mon Sep 17 00:00:00 2001
+From: gh0stless <schumm@arcor.de>
+Date: Sun, 25 Oct 2026 08:04:49 +0100
+Subject: [PATCH 1/4] d64: accept any DOS type when loading the BAM
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ source/images/d64.cpp | 20 +++-----------------
+ 1 file changed, 3 insertions(+), 17 deletions(-)
+
+diff --git a/source/images/d64.cpp b/source/images/d64.cpp
+index 29e4b32..bc5aabb 100644
+--- a/source/images/d64.cpp
++++ b/source/images/d64.cpp
+@@ -756,23 +756,9 @@ namespace firy {
+ 				}
+ 			}
+ 
+-			switch (mDosType) {
+-			default:	// Unknown DOS
+-				break;
+-
+-			case '2A':	// CBM DOS v2.6
+-			case '2P':	// PrologicDOS, ProSpeed
+-				if (mImageType != d64::eType_D81)
+-					return true;
+-				break;
+-
+-			case '3D':
+-				if (mImageType == d64::eType_D81)
+-					return true;
+-				break;
+-			}
+-
+-			return false;
++			// The DOS type ('2A', '3D', ...) is informational only; CBM drives ignore it
++			// when reading, and many disks carry custom values, so don't reject on it
++			return true;
+ 		}
+ 
+ 		/**
+-- 
+2.56.0.windows.3
+
+
+From 6e7b66d984692b0b693bcdddedaf2730fa6af9c2 Mon Sep 17 00:00:00 2001
+From: Andreas Schumm <schumm@arcor.de>
+Date: Sun, 25 Oct 2026 08:25:30 +0100
+Subject: [PATCH 2/4] Make saves and removals report failure instead of losing
+ data
+
+filesystemSave() now returns the result of writing the source back, so a
+failed write is no longer reported as success. sNode::remove() only detaches
+a node once the filesystem actually dropped it, and sDirectory::add() takes
+the node out of the tree again if saving it failed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ source/filesystem/filesystem.cpp | 24 ++++++++++++++++++++----
+ source/images/image.cpp          |  2 +-
+ 2 files changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/source/filesystem/filesystem.cpp b/source/filesystem/filesystem.cpp
+index b06e0ab..92a0ffa 100644
+--- a/source/filesystem/filesystem.cpp
++++ b/source/filesystem/filesystem.cpp
+@@ -61,11 +61,18 @@ namespace firy {
+ 		 * Remove
+ 		 */
+ 		bool sNode::remove() {
++			auto fs = mFilesystem.lock();
++			if (!fs)
++				return false;
++
++			// Only detach from the parent once the filesystem actually dropped the entry
++			if (!fs->filesystemRemove(shared_from_this()))
++				return false;
++
+ 			if (!mParent.expired())
+ 				mParent.lock()->nodeRemove(shared_from_this());
+ 
+-			mFilesystem.lock()->filesystemRemove(shared_from_this());
+-			return mFilesystem.lock()->filesystemSave();
++			return fs->filesystemSave();
+ 		}
+ 
+ 		/**
+@@ -118,10 +125,19 @@ namespace firy {
+ 		 * Add to the file system
+ 		 */
+ 		bool sDirectory::add(spNode pNode) {
++			auto fs = mFilesystem.lock();
++			if (!fs)
++				return false;
++
+ 			nodeAdd(pNode);
+-			mFilesystem.lock()->dirty();
++			fs->dirty();
+ 			dirty();
+-			return mFilesystem.lock()->filesystemSave();
++			if (fs->filesystemSave())
++				return true;
++
++			// Don't leave a node in the tree that never made it onto the disk
++			nodeRemove(pNode);
++			return false;
+ 		}
+ 
+ 		/**
+diff --git a/source/images/image.cpp b/source/images/image.cpp
+index 8198d14..5de98ae 100644
+--- a/source/images/image.cpp
++++ b/source/images/image.cpp
+@@ -55,7 +55,7 @@ namespace firy {
+ 				return false;
+ 
+ 			if (sourceIsDirty() && !savechanges("Save Changes")->isAborted()) {
+-				sourceSave();
++				return sourceSave();
+ 			}
+ 			return true;
+ 		}
+-- 
+2.56.0.windows.3
+
+
+From 02a6d6c15acd53a23d5ad5e7261150e3792c729f Mon Sep 17 00:00:00 2001
+From: Andreas Schumm <schumm@arcor.de>
+Date: Sun, 25 Oct 2026 08:25:31 +0100
+Subject: [PATCH 3/4] d64: fix scratching, directory growth, D71 BAM and space
+ handling
+
+- Removing a file recursed into itself until the stack overflowed. Files are
+  now scratched like CBM DOS does it: type byte 0, blocks back to the BAM.
+  REL and GEOS files are refused (their extra sectors aren't in the chain).
+- Directory entry offsets were stored as i*20 instead of i*0x20, so saving
+  an entry wrote over its neighbour.
+- Scratched entries were listed as files and their slots never reused.
+- Growing the directory picked sector+3 without checking or allocating it
+  and without clearing it; it now allocates a free sector on the directory
+  track with the drive's interleave and initialises it.
+- D71 second-side BAM was read and written in the D64 layout; it now uses
+  the 18/0 free counts and the 3-byte bitmaps in 53/0.
+- Files are never placed on the directory track (or D71 track 53), and a
+  disk without enough space fails up front instead of reporting success.
+- Empty files get the single 00 01 block CBM DOS writes for them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ source/images/d64.cpp | 255 ++++++++++++++++++++++++++++++------------
+ source/images/d64.hpp |   5 +
+ 2 files changed, 190 insertions(+), 70 deletions(-)
+
+diff --git a/source/images/d64.cpp b/source/images/d64.cpp
+index bc5aabb..534aea1 100644
+--- a/source/images/d64.cpp
++++ b/source/images/d64.cpp
+@@ -242,6 +242,44 @@ namespace firy {
+ 			return sectorWrite(pTS, block);
+ 		}
+ 
++		/**
++		 * D71 second side (tracks 36-70): the free counts sit in 18/0 at 0xDD, one byte
++		 * per track, and the bitmaps in 53/0 from offset 0, three bytes per track
++		 */
++		bool cD64::loadBamD71Side2() {
++			auto counts = sectorRead({ 18, 0 });
++			auto bitmaps = sectorRead({ 53, 0 });
++			if (!counts || !bitmaps)
++				return false;
++
++			for (tTrack track = 36; track <= 70; ++track) {
++				const size_t index = track - 36;
++				d64::sTrackBam bam;
++				bam.mFreeSectors = counts->getByte(0xDD + index);
++				bam.mSectors = 0;
++				for (size_t b = 0; b < 3; ++b)
++					bam.mSectors |= (uint64_t)bitmaps->getByte(index * 3 + b) << (8 * b);
++				mBam.push_back(bam);
++			}
++			return true;
++		}
++
++		bool cD64::saveBamD71Side2() {
++			auto counts = sectorRead({ 18, 0 });
++			auto bitmaps = sectorRead({ 53, 0 });
++			if (!counts || !bitmaps)
++				return false;
++
++			for (tTrack track = 36; track <= 70; ++track) {
++				const size_t index = track - 36;
++				const auto& bam = mBam.at(track - 1);
++				counts->putByte(0xDD + index, bam.mFreeSectors);
++				for (size_t b = 0; b < 3; ++b)
++					bitmaps->putByte(index * 3 + b, (uint8_t)(bam.mSectors >> (8 * b)));
++			}
++			return sectorWrite({ 18, 0 }, counts) && sectorWrite({ 53, 0 }, bitmaps);
++		}
++
+ 		/**
+ 		 * Create an empty filesystem
+ 		 */
+@@ -318,7 +356,7 @@ namespace firy {
+ 					d64::spFile file = filesystemEntryLoad(sectorBuffer, i * 0x20);
+ 					if (file) {
+ 						file->mDirIndex.mTS = ts;
+-						file->mDirIndex.mOffset = i * 20;
++						file->mDirIndex.mOffset = i * 0x20;
+ 						mFsRoot->nodeAdd(file);
+ 					}
+ 				}
+@@ -380,14 +418,31 @@ namespace firy {
+ 		 */
+ 		bool cD64::filesystemRemove(spNode pNode) {
+ 			auto file = std::dynamic_pointer_cast<d64::sFile>(pNode);
++			if (!file || file->mDirIndex.mTS.first == 0)
++				return false;
+ 
+-			file->dirty();
+-			file->mType = d64::eFileType_DEL;
+-			file->sizeInBytesSet(0);
++			// REL side sectors and GEOS VLIR records live outside the plain T/S chain;
++			// scratching those would leave their blocks allocated, so refuse instead
++			auto dirSector = sectorRead(file->mDirIndex.mTS);
++			if (!dirSector)
++				return false;
++			if (file->mType == d64::eFileType_REL || dirSector->getByte(file->mDirIndex.mOffset + 0x18) != 0) {
++				error("Deleting REL or GEOS files is not supported");
++				return false;
++			}
++
++			// The chain holds only the first sector until the file has been read.
++			// A broken chain still gets scratched; only the sectors reached are freed.
++			filesystemChainLoad(file);
++
++			// Scratch like CBM DOS: only the file type byte becomes 0 (name, start and size
++			// stay, so undelete tools still work) and the blocks go back to the BAM
+ 			sectorsFree(file->mChain);
+ 			file->mChain.clear();
+-			file->remove();
+-			return true;
++			file->mType = d64::eFileType_DEL;
++			file->mFlags = 0;
++			dirSector->putByte(file->mDirIndex.mOffset + 0x02, 0);
++			return sectorWrite(file->mDirIndex.mTS, dirSector);
+ 		}
+ 
+ 		/**
+@@ -420,18 +475,23 @@ namespace firy {
+ 					}
+ 				}
+ 
+-				// Reached end of directory?
++				// Reached end of directory? Then grow it by one sector on the directory track
+ 				tTrackSector tsnext = { sectorBuffer->getByte(0), sectorBuffer->getByte(1) };
+-				if (tsnext.first == 0 || tsnext.second == 0) {
+-					tsnext.first = mDirectoryTrack;
+-					tsnext.second = ts.second + 3;
+-					if (!trackSectorValid(tsnext) || tsnext == ts) {
++				if (tsnext.first == 0) {
++					if (!directorySectorAllocate(ts.second, tsnext))
++						return 0;
++
++					// Fresh directory sector: no entries, end-of-chain link 00 FF
++					auto fresh = std::make_shared<tBuffer>();
++					fresh->resize(sectorSize());
++					fresh->putByte(1, 0xFF);
++					if (!sectorWrite(tsnext, fresh))
+ 						return 0;
+-					}
+ 
+ 					sectorBuffer->putByte(0, (uint8_t)tsnext.first);
+ 					sectorBuffer->putByte(1, (uint8_t)tsnext.second);
+-					sectorWrite(ts, sectorBuffer);
++					if (!sectorWrite(ts, sectorBuffer))
++						return 0;
+ 				} else {
+ 					if (!trackSectorValid(tsnext))
+ 						break;
+@@ -443,15 +503,58 @@ namespace firy {
+ 			return 0;
+ 		}
+ 
++		/**
++		 * Tracks CBM DOS keeps for itself: never used for file data
++		 */
++		bool cD64::trackReserved(const tTrack pTrack) const {
++			if (pTrack == mDirectoryTrack)
++				return true;
++			// The 1571 reserves the whole of track 53 (second side BAM)
++			return mImageType == d64::eType_D71 && pTrack == 53;
++		}
++
++		/**
++		 * Pick and allocate a free sector on the directory track, using the drive's interleave
++		 */
++		bool cD64::directorySectorAllocate(const tSector pCurrent, tTrackSector& pResult) {
++			const tSector count = sectorCount(mDirectoryTrack);
++			const tSector interleave = (mImageType == d64::eType_D81) ? 1 : 3;
++			if (!count)
++				return false;
++
++			for (tSector step = 0; step < count; ++step) {
++				tTrackSector ts = { mDirectoryTrack, (tSector)((pCurrent + interleave + step) % count) };
++				if (!sectorIsFree(ts))
++					continue;
++				if (!sectorSet(ts, true))
++					return false;
++				pResult = ts;
++				return true;
++			}
++
++			error("Directory full");
++			return false;
++		}
++
+ 		/**
+ 		 * Save changes to the filesystem
+ 		 */
+-		bool cD64::filesystemSaveNative() { 
++		bool cD64::filesystemSaveNative() {
+ 			for (auto node : mFsRoot->mNodes) {
+ 				auto file = std::dynamic_pointer_cast<d64::sFile>(node);
+ 				if (!file->isDirty())
+ 					continue;
+ 
++				// CBM DOS stores even an empty file in one block (end marker 00 01)
++				const size_t size = file->mContent ? file->mContent->size() : 0;
++				const size_t sectorCount = size ? (size + d64::gDataBytesPerSector - 1) / d64::gDataBytesPerSector : 1;
++
++				// Check for space before touching the directory or the BAM
++				if (sectorCount > file->mChain.size() + freeDataSectors()) {
++					error("Not enough free space");
++					return false;
++				}
++
+ 				// Totally new file?
+ 				if (file->mDirIndex.mTS.first == 0) {
+ 					if (!filesystemFindFreeIndex(file)) {
+@@ -459,57 +562,47 @@ namespace firy {
+ 						return false;
+ 					}
+ 				}
+-				// If we have content
+-				if (file->mContent && file->mContent->size()) {
+-					auto sectorCount = file->mContent->size() / d64::gDataBytesPerSector;
+-					if (file->mContent->size() % d64::gDataBytesPerSector)
+-						++sectorCount;
+-
+-					// Do we need more sectors?
+-					if (file->mSizeInSectors != sectorCount) {
+-							
+-						if (file->mChain.size() >= 1) {
+-							sectorsFree(file->mChain);
+-							file->mChain.clear();
+-						}
+ 
+-						file->mChain = sectorsUse(sectorCount);
++				// Do we need other sectors?
++				if (file->mSizeInSectors != sectorCount || file->mChain.size() != sectorCount) {
++					if (file->mChain.size()) {
++						sectorsFree(file->mChain);
++						file->mChain.clear();
+ 					}
+ 
+-					if (file->mChain.size() == 0) {
+-						error("Not enough free space");
+-						continue;
+-					}
++					file->mChain = sectorsUse(sectorCount);
++				}
+ 
+-					file->mSizeInSectors = sectorCount;
+-					file->sizeInBytesSet(file->mSizeInSectors * (sectorSize() - 2));
+-
+-					// Write out each sector in the chain
+-					for (size_t index = 0; index < file->mChain.size(); ++index ) {
+-						auto& ts = file->mChain[index];
+-						sAccessUnit tsnext;
+-							
+-						// Final sector?
+-						if(index < (file->mChain.size() - 1))
+-							tsnext = file->mChain[index + 1];
+-						else {
+-							tsnext.mTS = tTrackSector( 0, (uint8_t)(file->mContent->size() + 1) );
+-						}
++				if (file->mChain.size() != sectorCount) {
++					error("Not enough free space");
++					return false;
++				}
+ 
+-						spBuffer buffer = std::make_shared<tBuffer>();
+-						buffer->pushByte((uint8_t)tsnext.track());
+-						buffer->pushByte((uint8_t)tsnext.sector());
+-						buffer->pushBuffer(file->mContent->takeBytes(d64::gDataBytesPerSector < file->mContent->size() ? d64::gDataBytesPerSector : file->mContent->size()));
+-						sectorWrite(ts.mTS, buffer);
+-					}
+-				} else {
+-					if (file->mChain.size()) {
+-						sectorsFree(file->mChain);
+-						file->mChain.clear();
++				file->mSizeInSectors = sectorCount;
++				file->sizeInBytesSet(size);
++
++				// Write out each sector in the chain: link to the next one, or for the last
++				// sector track 0 and the offset of its last used byte
++				for (size_t index = 0; index < sectorCount; ++index) {
++					const size_t start = index * d64::gDataBytesPerSector;
++					const size_t length = min(d64::gDataBytesPerSector, size - min(size, start));
++
++					spBuffer buffer = std::make_shared<tBuffer>();
++					buffer->resize(sectorSize());
++					if (index + 1 < sectorCount) {
++						buffer->putByte(0, (uint8_t)file->mChain[index + 1].track());
++						buffer->putByte(1, (uint8_t)file->mChain[index + 1].sector());
++					} else {
++						buffer->putByte(0, 0);
++						buffer->putByte(1, (uint8_t)(length + 1));
+ 					}
+-					file->mSizeInSectors = 0;
+-					file->sizeInBytesSet(0);
++					if (length)
++						memcpy(buffer->data() + 2, file->mContent->data() + start, length);
++
++					if (!sectorWrite(file->mChain[index].mTS, buffer))
++						return false;
+ 				}
++				file->mContent.reset();
+ 
+ 				if (!filesystemEntrySave(file)) {
+ 					return false;
+@@ -529,7 +622,19 @@ namespace firy {
+ 		 *
+ 		 */
+ 		size_t cD64::filesystemTotalBytesFree() {
+-			return sectorsGetFree().size() * d64::gDataBytesPerSector;
++			return freeDataSectors() * d64::gDataBytesPerSector;
++		}
++
++		/**
++		 * Free sectors usable for file data (the "blocks free" the drive reports)
++		 */
++		size_t cD64::freeDataSectors() const {
++			size_t total = 0;
++			for (auto& unit : sectorsGetFree()) {
++				if (!trackReserved(unit.track()))
++					++total;
++			}
++			return total;
+ 		}
+ 
+ 		/**
+@@ -612,6 +717,9 @@ namespace firy {
+ 			tTrackSector TS = { 1, 0 };
+ 
+ 			for (; TS.first <= trackCount(); ++TS.first) {
++				if (trackReserved(TS.first))
++					continue;
++
+ 				for (TS.second = 0; TS.second < sectorCount(TS.first); ++TS.second) {
+ 					if (sectorIsFree(TS)) {
+ 						if (!sectorSet(TS, true)) {
+@@ -749,11 +857,8 @@ namespace firy {
+ 			else {
+ 				if (!loadBamBlock({18, 0}, 1, 35, 4, 0x04, track))
+ 					return false;
+-				if (mImageType == d64::eType_D71) {
+-					track = 36;
+-					if (!loadBamBlock({53, 0}, 36, 70, 4, 0x04, track))
+-						return false;
+-				}
++				if (mImageType == d64::eType_D71 && !loadBamD71Side2())
++					return false;
+ 			}
+ 
+ 			// The DOS type ('2A', '3D', ...) is informational only; CBM drives ignore it
+@@ -814,11 +919,8 @@ namespace firy {
+ 
+ 				if (!saveBamBlock({18,0}, 1, 35, 4, 0x04, track))
+ 					return false;
+-				if (mImageType == d64::eType_D71) {
+-					track = 36;
+-					if (!saveBamBlock({53,0}, 36, 70, 4, 0x04, track))
+-						return false;
+-				}
++				if (mImageType == d64::eType_D71 && !saveBamD71Side2())
++					return false;
+ 				break;
+ 			}
+ 
+@@ -829,6 +931,10 @@ namespace firy {
+ 		 * Load a file from the sector buffer
+ 		 */
+ 		d64::spFile cD64::filesystemEntryLoad(spBuffer pBuffer, const size_t pOffset) {
++			// A zero type byte is a scratched entry (or an unused slot) - a free slot, not a file
++			if (pBuffer->getByte(pOffset + 0x02) == 0)
++				return 0;
++
+ 			d64::spFile file = filesystemNodeCreate<d64::sFile>(pBuffer->getString(pOffset + 0x05, 16, 0xA0));
+ 
+ 			// Get the filetype
+@@ -860,12 +966,21 @@ namespace firy {
+ 		 */
+ 		bool cD64::filesystemEntrySave(d64::spFile pFile) {
+ 			auto sectorBuffer = sectorRead(pFile->mDirIndex.mTS);
++			if (!sectorBuffer)
++				return false;
+ 			auto offset = pFile->mDirIndex.mOffset;
+ 			tTrackSector startTs = pFile->mChain.empty() ? tTrackSector(0, 0) : pFile->mChain[0].mTS;
+ 
+-			// 
++			//
+ 			sectorBuffer->putByte(offset + 0x02, pFile->mFlags | pFile->mType);
+ 
++			// REL side sector, record length and GEOS fields - a reused (scratched) slot
++			// may still carry the old file's values there
++			if (pFile->mType != d64::eFileType_REL) {
++				for (size_t i = 0x15; i <= 0x1D; ++i)
++					sectorBuffer->putByte(offset + i, 0);
++			}
++
+ 			auto str = str_to_upper(pFile->nameGet());
+ 			str.resize(16, (char) 0xA0);
+ 			sectorBuffer->putString(offset + 0x05, str);
+diff --git a/source/images/d64.hpp b/source/images/d64.hpp
+index 3f5b646..4047bb9 100644
+--- a/source/images/d64.hpp
++++ b/source/images/d64.hpp
+@@ -176,6 +176,11 @@ namespace firy {
+ 			bool loadBamBlock(const tTrackSector pTS, const tTrack pStartTrack, const tTrack pEndTrack, const uint8_t pBytesPerTrackBam, const tSector pBamOffset, tTrack& pTrackCursor);
+ 			bool saveBamBlock(const tTrackSector pTS, const tTrack pStartTrack, const tTrack pEndTrack, const uint8_t pBytesPerTrackBam, const tSector pBamOffset, tTrack& pTrackCursor);
+ 			bool trackSectorValid(const tTrackSector& pTS) const;
++			bool trackReserved(const tTrack pTrack) const;
++			bool directorySectorAllocate(const tSector pCurrent, tTrackSector& pResult);
++			size_t freeDataSectors() const;
++			bool loadBamD71Side2();
++			bool saveBamD71Side2();
+ 
+ 			std::vector<d64::sTrackBam> mBam;
+ 
+-- 
+2.56.0.windows.3
+
+
+From 167d1cf34474c0ec63a6139b4068396f6cc551f3 Mon Sep 17 00:00:00 2001
+From: Andreas Schumm <schumm@arcor.de>
+Date: Sun, 25 Oct 2026 08:25:31 +0100
+Subject: [PATCH 4/4] adf: rewrite file creation and removal
+
+- Out of space threw std::exception from blockUseSingle(); space is now
+  checked before anything is written.
+- OFS files over 72 blocks got a broken data chain and leaked a block; data,
+  header and extension blocks are now allocated up front and written in one
+  pass (extension blocks also get their parent pointer).
+- Duplicate names leaked a block and left a node that failed every later
+  save; names are compared case-insensitively the way AmigaDOS does
+  (Latin-1 on international volumes), with a loop guard on hash chains.
+- Removal finds the entry by block number instead of by name, frees
+  extension blocks, refuses non-empty directories and fixes the root
+  directory case.
+- Directory and volume modification dates are updated.
+- Writing to directory cache (DCFS) volumes is refused, since the cache
+  isn't maintained.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ source/images/adf.cpp | 459 ++++++++++++++++++++----------------------
+ source/images/adf.hpp |  39 ++--
+ 2 files changed, 245 insertions(+), 253 deletions(-)
+
+diff --git a/source/images/adf.cpp b/source/images/adf.cpp
+index 2ea3b59..f5655d1 100644
+--- a/source/images/adf.cpp
++++ b/source/images/adf.cpp
+@@ -215,7 +215,7 @@ namespace firy {
+ 				pHeader->dataSize = 0;
+ 				pHeader->secType = -3;
+ 				pHeader->parent = (int32_t)pParent->mBlockNumber;
+-				if (mContent->size()) {
++				if (mContent && mContent->size()) {
+ 					pHeader->byteSize = (uint32_t)mContent->size();
+ 				}
+ 				pHeader->access = this->access;
+@@ -490,14 +490,26 @@ namespace firy {
+ 		}
+ 
+ 		/**
+-		 *
++		 * Write the in-memory changes to the image
+ 		 */
+ 		bool cADF::filesystemSaveNative() {
++			// The directory cache of DCFS volumes isn't maintained, so writing would leave
++			// AmigaDOS with stale listings - refuse instead
++			if (isDirCache()) {
++				error("Writing to directory cache (DCFS) volumes is not supported");
++				return false;
++			}
++
+ 			{
+ 				std::shared_ptr<adf::sRootBlock> block = blockLoad<adf::sRootBlock>(mBlockRoot);
++				if (!block)
++					return false;
+ 				block->nameLen = (char)min(adf::gFilenameMaximumLength, mFsName.size());
+ 				memcpy(block->diskName, mFsName.data(), block->nameLen);
+-				blockSaveChecksum(mBlockRoot, block);
++				// Volume last altered
++				adf::convertTimeToAmigaTime(helpers::sDateTime(), &(block->days), &(block->mins), &(block->ticks));
++				if (!blockSaveChecksum(mBlockRoot, block))
++					return false;
+ 			}
+ 
+ 			if (!filesystemSaveNode(mFsRoot, 0))
+@@ -511,119 +523,105 @@ namespace firy {
+ 		}
+ 
+ 		/**
+-		 * Copy a buffer into blocks, adding the block numbers to the pBlock 'dataBlocks' member
++		 * Save a new file: header block, data blocks and (for more than 72 data blocks)
++		 * file extension blocks
+ 		 */
+-		template <class tBlockType> bool cADF::filesystemSaveFileToBlocks(std::shared_ptr<tBlockType> pBlock, spBuffer pBuffer, size_t pSequenceNumber) {
+-			pBlock->highSeq = 0;
+-			std::fill(std::begin(pBlock->dataBlocks), std::end(pBlock->dataBlocks), 0);
+-			pBlock->firstData = 0;
+-			pBlock->extension = 0;
++		bool cADF::filesystemSaveFile(adf::spFile pFile, adf::spDir pParent) {
++			if (!pFile->isDirty())
++				return true;
+ 
+-			tBlock nextBlock = blockUseSingle();
++			// Replacing the content of a file that is already on disk isn't supported;
++			// callers delete it and add a new one instead
++			if (pFile->mBlockNumber) {
++				error("Rewriting an existing file is not supported");
++				return false;
++			}
+ 
+-			// Loop until we fill the block, or run out of buffer
+-			for (int index = adf::gDataBlocksMax - 1; index >= 0; --index) {
+-				pBlock->dataBlocks[index] = (int32_t)nextBlock;
+-				++pBlock->highSeq;
++			const size_t size = pFile->mContent ? pFile->mContent->size() : 0;
++			const size_t perBlock = isFFS() ? adf::gBytesPerBlockFFS : adf::gBytesPerBlockOFS;
++			const size_t dataCount = (size + perBlock - 1) / perBlock;
++			const size_t extCount = dataCount > adf::gDataBlocksMax ? (dataCount - adf::gDataBlocksMax + adf::gDataBlocksMax - 1) / adf::gDataBlocksMax : 0;
+ 
+-				// Fast File System?
+-				if (isFFS()) {
+-					spBuffer buffer = std::make_shared<tBuffer>();
+-					buffer->pushBuffer(pBuffer->takeBytes(adf::gBytesPerBlockFFS < pBuffer->size() ? adf::gBytesPerBlockFFS : pBuffer->size()));
+-					if (!blockWrite(nextBlock, buffer)) {
+-						return false;
+-					}
+-				} else {
+-					auto bufferSrc = pBuffer->takeBytes(adf::gBytesPerBlockOFS < pBuffer->size() ? adf::gBytesPerBlockOFS : pBuffer->size());
+-					auto buffer = blockObjectCreate<adf::sOFSDataBlock>();
+-
+-					buffer->seqNum = (int32_t) ++pSequenceNumber;
+-					buffer->mType = 8;
+-					buffer->dataSize = (int32_t)bufferSrc->size();
+-					buffer->headerKey = pBlock->headerKey;
+-					if(pBuffer->size())
+-						buffer->nextData = (int32_t)blockUseSingle();
+-
+-					memcpy(buffer->data, bufferSrc->data(), buffer->dataSize);
+-					if (!blockSaveChecksum(nextBlock, buffer)) {
+-						return false;
+-					}
+-
+-					nextBlock = buffer->nextData;
+-					if (nextBlock)
+-						continue;
+-				}
++			// Everything must fit before anything is written
++			if (blocksGetFree().size() < 1 + dataCount + extCount) {
++				error("Not enough free space");
++				return false;
++			}
+ 
+-				if (!pBuffer->size())
+-					break;
++			auto headerBlock = entryCreate(pParent, pFile);
++			if (headerBlock < 0)
++				return false;
+ 
+-				nextBlock = blockUseSingle();
++			std::vector<sAccessUnit> data, exts;
++			if (dataCount) {
++				data = blockUse(dataCount);
++				if (data.size() != dataCount)
++					return false;
+ 			}
+-
+-			// a File-Header-Block contains the first block of the data
+-			if (typeid(tBlockType) == typeid(adf::sFileHeaderBlock)) {
+-				pBlock->firstData = pBlock->dataBlocks[adf::gDataBlocksMax - 1];
++			if (extCount) {
++				exts = blockUse(extCount);
++				if (exts.size() != extCount)
++					return false;
+ 			}
+ 
+-			// Need extension?
+-			pBlock->extension = ((int32_t)pBuffer->size() == 0) ? 0 : (int32_t) blockUseSingle();
++			pFile->mBlockNumber = headerBlock;
+ 
+-			// Add more extensions and loop until all bytes saved
+-			auto ext = pBlock->extension;
+-			while (pBuffer->size()) {
+-				auto blockExt = blockObjectCreate<adf::sFileExtBlock>();
+-				blockExt->mType = 0x10;
+-				blockExt->headerKey = ext;
+-				blockExt->secType = -3;
++			// Data blocks
++			for (size_t i = 0; i < dataCount; ++i) {
++				const size_t start = i * perBlock;
++				const size_t length = min(perBlock, size - start);
+ 
+-				if (!filesystemSaveFileToBlocks(blockExt, pBuffer, pSequenceNumber)) {
+-					return false;
++				if (isFFS()) {
++					auto buffer = std::make_shared<tBuffer>();
++					buffer->resize(adf::gBytesPerBlockFFS);
++					memcpy(buffer->data(), pFile->mContent->data() + start, length);
++					if (!blockWrite(data[i].block(), buffer))
++						return false;
++				} else {
++					auto block = blockObjectCreate<adf::sOFSDataBlock>();
++					block->mType = 8;	// T_DATA
++					block->headerKey = (int32_t)headerBlock;
++					block->seqNum = (int32_t)(i + 1);
++					block->dataSize = (int32_t)length;
++					block->nextData = (i + 1 < dataCount) ? (int32_t)data[i + 1].block() : 0;
++					memcpy(block->data, pFile->mContent->data() + start, length);
++					if (!blockSaveChecksum(data[i].block(), block))
++						return false;
+ 				}
+-
+-				// Need another extension?
+-				if(!blockExt->extension)
+-					blockExt->extension = ((int32_t)pBuffer->size() == 0) ? 0 : (int32_t) blockUseSingle();
+-
+-				blockSaveChecksum(ext, blockExt);
+-				ext = blockExt->extension;
+ 			}
+-			return true;
+-		}
+-
+-		/**
+-		 * Save a file
+-		 */
+-		bool cADF::filesystemSaveFile(adf::spFile pFile, adf::spDir pParent) {
+-			auto entry = std::dynamic_pointer_cast<adf::sEntry>(pFile);
+-			bool isNew = false;
+-
+-			if (!pFile->isDirty())
+-				return true;
+ 
+-			// New File?
+-			if (!pFile->mBlockNumber) {
+-				auto newBlock = entryCreate(pParent, pFile);
+-				if (newBlock == -1)
+-					return false;
++			// Header: the first 72 data blocks, stored in reverse order
++			auto header = blockObjectCreate<adf::sFileHeaderBlock>();
++			pFile->setBlock(header, pParent);
++			header->byteSize = (uint32_t)size;
++			header->firstData = dataCount ? (int32_t)data[0].block() : 0;
++			header->highSeq = (int32_t)min(dataCount, adf::gDataBlocksMax);
++			for (size_t k = 0; k < (size_t)header->highSeq; ++k)
++				header->dataBlocks[adf::gDataBlocksMax - 1 - k] = (int32_t)data[k].block();
++			header->extension = extCount ? (int32_t)exts[0].block() : 0;
++			if (!blockSaveChecksum(headerBlock, header))
++				return false;
+ 
+-				// File exists
+-				if (newBlock == -2)
++			// Extension blocks: 72 more data block pointers each
++			for (size_t j = 0; j < extCount; ++j) {
++				const size_t first = adf::gDataBlocksMax * (j + 1);
++				const size_t count = min(adf::gDataBlocksMax, dataCount - first);
++
++				auto ext = blockObjectCreate<adf::sFileExtBlock>();
++				ext->mType = 16;	// T_LIST
++				ext->headerKey = (int32_t)exts[j].block();
++				ext->highSeq = (int32_t)count;
++				ext->secType = adf::ST_FILE;
++				ext->parent = (int32_t)headerBlock;
++				for (size_t k = 0; k < count; ++k)
++					ext->dataBlocks[adf::gDataBlocksMax - 1 - k] = (int32_t)data[first + k].block();
++				ext->extension = (j + 1 < extCount) ? (int32_t)exts[j + 1].block() : 0;
++				if (!blockSaveChecksum(exts[j].block(), ext))
+ 					return false;
+-
+-				isNew = true;
+-				pFile->mBlockNumber = newBlock;
+ 			}
+ 
+-			auto header = isNew ? blockObjectCreate<adf::sFileHeaderBlock>() : blockLoad<adf::sFileHeaderBlock>(pFile->mBlockNumber);
+-			pFile->setBlock(header, pParent);
+-			if (pFile->mContent->size()) {
+-				pFile->sizeInBytesSet(pFile->mContent->size());
+-				if (!filesystemSaveFileToBlocks(header, pFile->mContent)) {
+-					// TODO: Free blocks
+-					return false;
+-				}
+-			}
+-			blockSaveChecksum(pFile->mBlockNumber, header);
++			pFile->sizeInBytesSet(size);
++			pFile->mContent.reset();
+ 			pFile->dirty(false);
+ 			return true;
+ 		}
+@@ -632,26 +630,22 @@ namespace firy {
+ 		 * Save a directory
+ 		 */
+ 		bool cADF::filesystemSaveDir(adf::spDir pDir, adf::spDir pParent) {
+-			bool isNew = false;
+-
+ 			if (pDir->isDirty()) {
+ 				// If no parent, this is the root
+ 				if (pParent) {
+ 					// Has this dir already got a header block
+ 					if (!pDir->mBlockNumber) {
+ 						auto newBlock = entryCreate(pParent, pDir);
+-						if (newBlock == -1)
++						if (newBlock < 0)
+ 							return false;
+-						if (newBlock == -2)
+-							return true;
+ 
+-						isNew = true;
+ 						pDir->mBlockNumber = newBlock;
+-					}
+ 
+-					auto header = isNew ? blockObjectCreate<adf::sFileHeaderBlock>() : blockLoad<adf::sFileHeaderBlock>(pDir->mBlockNumber);
+-					pDir->setBlock(header, pParent);
+-					blockSaveChecksum(header->headerKey, header);
++						auto header = blockObjectCreate<adf::sFileHeaderBlock>();
++						pDir->setBlock(header, pParent);
++						if (!blockSaveChecksum(newBlock, header))
++							return false;
++					}
+ 				}
+ 
+ 				pDir->dirty(false);
+@@ -698,61 +692,66 @@ namespace firy {
+ 		}
+ 
+ 		/**
+-		 * Get the sector for a hash from 'pDir'
++		 * Allocate a header block for pNode and link it into pDir's hash table.
++		 * Returns the block, -1 on failure, or -2 if pDir already holds that name.
+ 		 */
+ 		int32_t cADF::entryCreate(adf::spDir pDir, spNode pNode) {
+ 			auto block = blockLoad<adf::sEntryBlock>(pDir->mBlockNumber);
+ 			if (!block)
+ 				return -1;
+ 
+-			auto entry = std::dynamic_pointer_cast<adf::sEntry>(pNode);
+-			auto hash = entry->getNameHash(isInternational());
+-
+-			auto newSect = (int32_t)blockUseSingle();
++			auto hash = adf::sEntry::getHashValue(pNode->nameGet(), isInternational());
+ 
+-			// Does our hash exist already
+-			auto sect = block->hashTable[hash];
+-			if (sect == 0) {
++			// Walk the hash chain: refuse duplicates (AmigaDOS names are case-insensitive)
++			// and find the last entry to append to
++			std::vector<tBlock> visited;
++			std::shared_ptr<adf::sEntryBlock> last;
++			tBlock lastNo = 0;
++			tBlock sect = (tBlock)block->hashTable[hash];
+ 
+-				block->hashTable[hash] = newSect;
+-				adf::convertTimeToAmigaTime({}, &(block->days), &(block->mins), &(block->ticks));
+-				if (!blockSaveChecksum(pDir->mBlockNumber, block)) {
+-					blockSet(newSect, false);
++			while (sect) {
++				if (!blockIsValid(sect) || std::find(visited.begin(), visited.end(), sect) != visited.end()) {
++					error("Corrupt hash chain");
+ 					return -1;
+ 				}
++				visited.push_back(sect);
+ 
+-				return newSect;
+-			}
+-
+-			// Hash already exists
+-			// Follow chain
+-			std::shared_ptr<adf::sEntryBlock> nextBlock;
+-
+-			while (sect) {
+-				nextBlock = blockLoad<adf::sEntryBlock>(sect);
+-				if (!nextBlock) {
++				auto entry = blockLoad<adf::sEntryBlock>(sect);
++				if (!entry) {
+ 					error("next block not found");
+ 					return -1;
+ 				}
+ 
+-				// Check if its the file we are trying to save
+-				if (nextBlock->nameLen == pNode->nameGet().size()) {
+-					auto name = std::string(nextBlock->name, min(nextBlock->nameLen, adf::gFilenameMaximumLength));
+-
+-					if (pNode->nameGet() == name) {
+-						return -2;
+-					}
++				auto name = std::string(entry->name, min((size_t)(uint8_t)entry->nameLen, adf::gFilenameMaximumLength));
++				if (adf::sEntry::namesEqual(name, pNode->nameGet(), isInternational())) {
++					error("Name already exists");
++					return -2;
+ 				}
+ 
+-				sect = nextBlock->nextSameHash;
++				last = entry;
++				lastNo = sect;
++				sect = (tBlock)entry->nextSameHash;
+ 			}
+ 
+-			// Update the block to reference the new sector
+-			nextBlock->nextSameHash = newSect;
+-			if (!blockSaveChecksum(nextBlock->headerKey, nextBlock)) {
+-				error(" block update failed");
++			auto blocks = blockUse(1);
++			if (blocks.size() != 1) {
++				error("Not enough free space");
+ 				return -1;
+ 			}
++			auto newSect = (int32_t)blocks[0].block();
++
++			if (last) {
++				last->nextSameHash = newSect;
++				if (!blockSaveChecksum(lastNo, last))
++					return -1;
++			} else {
++				block->hashTable[hash] = newSect;
++			}
++
++			// Directory last altered
++			adf::convertTimeToAmigaTime(helpers::sDateTime(), &(block->days), &(block->mins), &(block->ticks));
++			if (!blockSaveChecksum(pDir->mBlockNumber, block))
++				return -1;
+ 
+ 			return newSect;
+ 		}
+@@ -970,123 +969,107 @@ namespace firy {
+ 		}
+ 		
+ 		/**
+-		 * Delete a node from the filesystem
++		 * Delete a node from the filesystem: unlink it from its parent's hash chain and
++		 * free its header, data and extension blocks. Directories must already be empty.
+ 		 */
+ 		bool cADF::filesystemRemove(spNode pFile) {
+-			auto entry = std::dynamic_pointer_cast<adf::sEntry>(pFile);
+-			auto blockFirst = blockLoad<adf::sEntryBlock>(entry->mBlockNumber);
+-			if (!blockFirst)
++			if (isDirCache()) {
++				error("Writing to directory cache (DCFS) volumes is not supported");
+ 				return false;
++			}
+ 
+-			// Get the parent block (the directory)
+-			auto block = blockLoad<adf::sEntryBlock>(blockFirst->parent);
+-			if (!block)
++			auto entry = std::dynamic_pointer_cast<adf::sEntry>(pFile);
++			if (!entry || !blockIsValid(entry->mBlockNumber))
+ 				return false;
+ 
+-			auto hash = entry->getNameHash(isInternational());
+-
+-			// Find the hash for this filename
+-			auto sect = block->hashTable[hash];
+-			if (!sect)
++			auto header = blockLoad<adf::sEntryBlock>(entry->mBlockNumber);
++			if (!header)
+ 				return false;
+-			
+-			size_t lastBlockNo = blockFirst->parent;
+-			std::shared_ptr<adf::sEntryBlock> lastBlock = block;
+-			std::shared_ptr<adf::sEntryBlock> nextBlock;
+ 
+-			while (sect) {
+-				nextBlock = blockLoad<adf::sEntryBlock>(sect);
+-				if (!nextBlock) {
+-					error(" next block not found");
+-					return false;
+-				}
++			const tBlock parentNo = (tBlock)header->parent;
++			auto parent = blockIsValid(parentNo) ? blockLoad<adf::sEntryBlock>(parentNo) : nullptr;
++			if (!parent)
++				return false;
+ 
+-				// Check if its the file we are trying to save
+-				if (nextBlock->nameLen == pFile->nameGet().size()) {
+-					std::vector<sAccessUnit> free;
++			std::vector<sAccessUnit> free;
++			free.push_back(entry->mBlockNumber);
+ 
+-					auto name = std::string(nextBlock->name, min(nextBlock->nameLen, adf::gFilenameMaximumLength));
++			if (header->secType == adf::ST_DIR) {
++				for (auto& child : header->hashTable) {
++					if (child) {
++						error("Directory is not empty");
++						return false;
++					}
++				}
++			} else {
++				// Data blocks listed in the header, then in each extension block
++				for (int index = (adf::gDataBlocksMax - 1); index >= 0; --index) {
++					if (!header->hashTable[index])
++						break;
++					free.push_back((tBlock)header->hashTable[index]);
++				}
+ 
+-					if (pFile->nameGet() == name) {
+-						free.push_back(sect);
++				std::vector<tBlock> visited;
++				tBlock nextSector = (tBlock)header->extension;
++				while (nextSector) {
++					if (!blockIsValid(nextSector) || std::find(visited.begin(), visited.end(), nextSector) != visited.end())
++						return false;
++					visited.push_back(nextSector);
++					free.push_back(nextSector);
+ 
+-						// If the last block was the directory holding our fileblockheader
+-						if (lastBlock->hashTable[hash] == entry->mBlockNumber) {
+-							// And we know another file with same hash exists
+-							if (nextBlock->nextSameHash) {
+-								lastBlock->hashTable[hash] = nextBlock->nextSameHash;
+-							}
+-							else {
+-								lastBlock->hashTable[hash] = 0;
+-							}
++					auto blockExt = blockLoad<adf::sFileExtBlock>(nextSector);
++					if (!blockExt)
++						return false;
+ 
+-							// If the block isnt set, this might be the root
+-							if(lastBlock->headerKey)
+-								blockSaveChecksum(lastBlock->headerKey, lastBlock);
+-							else {
+-								blockSaveChecksum(mBlockRoot, lastBlock);
+-							}
++					for (int index = adf::gDataBlocksMax - 1; index >= 0; --index) {
++						if (!blockExt->dataBlocks[index])
++							break;
++						free.push_back((tBlock)blockExt->dataBlocks[index]);
++					}
++					nextSector = (tBlock)blockExt->extension;
++				}
++			}
+ 
+-						} else {
+-							// Set the next file header in the previous block
+-							lastBlock->nextSameHash = nextBlock->nextSameHash;
+-							blockSaveChecksum(lastBlock->headerKey, lastBlock);
+-						}
++			// Unlink from the hash chain, finding it by block number rather than by name
++			auto name = std::string(header->name, min((size_t)(uint8_t)header->nameLen, adf::gFilenameMaximumLength));
++			auto hash = adf::sEntry::getHashValue(name, isInternational());
+ 
+-						// Now loop through the file header blocks and free the blocks
+-						for (int index = (adf::gDataBlocksMax - 1); index >= 0; --index) {
+-							if (!nextBlock->hashTable[index])
+-								break;
+-							free.push_back(nextBlock->hashTable[index]);
+-						}
++			std::vector<tBlock> visited;
++			std::shared_ptr<adf::sEntryBlock> prev;
++			tBlock prevNo = 0;
++			tBlock sect = (tBlock)parent->hashTable[hash];
+ 
+-						// Directory?
+-						if (nextBlock->mType == 2 && nextBlock->secType == adf::ST_DIR) {
+-							// Check for and free directory cache
+-							if (nextBlock->extension && isDirCache()) {
+-								tBlock nextSector = nextBlock->extension;
+-								while (nextSector) {
+-									free.push_back(nextSector);
+-									auto blockExt = blockLoad<adf::sDirCacheBlock>(nextSector);
+-									if (!blockExt) {
+-										error("sDirCacheBlock not found");
+-										break;
+-									}
+-									nextSector = blockExt->nextDirC;
+-								}
+-							}
++			while (sect && sect != entry->mBlockNumber) {
++				if (!blockIsValid(sect) || std::find(visited.begin(), visited.end(), sect) != visited.end())
++					return false;
++				visited.push_back(sect);
+ 
+-						} else {
+-							// Now loop the file extension blocks
+-							tBlock nextSector = nextBlock->extension;
+-							while (nextSector) {
+-								free.push_back(nextSector);
+-								auto blockExt = blockLoad<adf::sFileExtBlock>(nextSector);
+-								if (!blockExt) {
+-									error("sFileExtBlock not found");
+-									break;
+-								}
+-
+-								for (int index = adf::gDataBlocksMax - 1; index >= 0; --index) {
+-									if (!blockExt->dataBlocks[index])
+-										break;
+-									free.push_back(blockExt->dataBlocks[index]);
+-								}
+-								nextSector = blockExt->extension;
+-							}
+-						}
++				prev = blockLoad<adf::sEntryBlock>(sect);
++				if (!prev)
++					return false;
++				prevNo = sect;
++				sect = (tBlock)prev->nextSameHash;
++			}
+ 
+-						blocksFree(free);
+-						return true;
+-					}
+-				}
++			if (!sect) {
++				error("Entry not found in its parent directory");
++				return false;
++			}
+ 
+-				lastBlockNo = sect;
+-				lastBlock = nextBlock;
+-				sect = nextBlock->nextSameHash;
++			if (prev) {
++				prev->nextSameHash = header->nextSameHash;
++				if (!blockSaveChecksum(prevNo, prev))
++					return false;
++			} else {
++				parent->hashTable[hash] = header->nextSameHash;
+ 			}
+ 
+-			return false;
++			// Directory last altered
++			adf::convertTimeToAmigaTime(helpers::sDateTime(), &(parent->days), &(parent->mins), &(parent->ticks));
++			if (!blockSaveChecksum(parentNo, parent))
++				return false;
++
++			return blocksFree(free);
+ 		}
+ 
+ 		spFile cADF::filesystemFileCreate(const std::string& pName) {
+diff --git a/source/images/adf.hpp b/source/images/adf.hpp
+index 1594776..1b45774 100644
+--- a/source/images/adf.hpp
++++ b/source/images/adf.hpp
+@@ -218,28 +218,39 @@ namespace firy {
+ 				}
+ 
+ 				/**
+-				 * To Upper for international characters
++				 * To Upper the way AmigaDOS compares names: plain ASCII, plus the
++				 * Latin-1 letters when the volume is in international mode
+ 				 */
+-				uint8_t toUpperIntl(const uint8_t c) {
+-					return (c >= 'a' && c <= 'z') || 
+-						   (c >= 224 && c <= 254 && c != 247) ? c - ('a' - 'A') : c;
++				static uint8_t toUpperAmiga(const uint8_t c, const bool pInternational) {
++					if (c >= 'a' && c <= 'z')
++						return c - ('a' - 'A');
++					if (pInternational && c >= 224 && c <= 254 && c != 247)
++						return c - ('a' - 'A');
++					return c;
++				}
++
++				/**
++				 * Compare two names the way AmigaDOS does (case-insensitive)
++				 */
++				static bool namesEqual(const std::string& pA, const std::string& pB, const bool pInternational) {
++					if (pA.size() != pB.size())
++						return false;
++					for (size_t i = 0; i < pA.size(); ++i) {
++						if (toUpperAmiga((uint8_t)pA[i], pInternational) != toUpperAmiga((uint8_t)pB[i], pInternational))
++							return false;
++					}
++					return true;
+ 				}
+ 
+ 				/**
+ 				 * Get the hash value for the provided string
+ 				 */
+-				uint32_t getHashValue(const std::string& pName, const bool pInternational) {
++				static uint32_t getHashValue(const std::string& pName, const bool pInternational) {
+ 					uint32_t hash, len;
+-					unsigned int i;
+-					uint8_t upper;
+ 
+ 					len = hash = min((uint32_t) pName.size(), gFilenameMaximumLength);
+-					for (i = 0; i < len; i++) {
+-						if (pInternational)
+-							upper = toUpperIntl(pName[i]);
+-						else
+-							upper = toupper(pName[i]);
+-						hash = (hash * 13 + upper) & 0x7ff;
++					for (uint32_t i = 0; i < len; i++) {
++						hash = (hash * 13 + toUpperAmiga((uint8_t)pName[i], pInternational)) & 0x7ff;
+ 					}
+ 					return (hash % HT_SIZE);
+ 				}
+@@ -349,8 +360,6 @@ namespace firy {
+ 			virtual bool filesystemSaveFile(adf::spFile pFile, adf::spDir pParent);
+ 			virtual bool filesystemSaveDir(adf::spDir pNode, adf::spDir pParent);
+ 
+-			template <class tBlockType> bool filesystemSaveFileToBlocks(std::shared_ptr<tBlockType> pBlock, spBuffer pBuffer, size_t pSequenceNumber = 0);
+-			
+ 			virtual size_t filesystemTotalBytesFree() override;
+ 			virtual size_t filesystemTotalBytesMax() override;
+ 
+-- 
+2.56.0.windows.3
+

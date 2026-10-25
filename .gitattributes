@@ -1,0 +1,2 @@
+# Patches for firy must keep their exact line endings for git apply
+patches/*.patch -text

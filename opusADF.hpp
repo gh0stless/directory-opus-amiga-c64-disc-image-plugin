@@ -16,7 +16,7 @@ public:
     firy::spDirectory mDirectory;
     bool mIsPartitionLevel = false;
     size_t mIndex = 0;
-    std::regex mFindMask;
+    std::wregex mFindMask;
 };
 
 class cFiryPluginData {
@@ -26,6 +26,12 @@ class cFiryPluginData {
     firy::spImage mImage;
     std::wstring mImagePath;
     size_t mLastError;
+
+    // mImage only exists in memory (an unpacked DMS) - nothing can be written back
+    bool mReadOnly = false;
+
+    // "Replace all" was picked in the replace dialog during the current batch
+    bool mReplaceAll = false;
 
     // RDB-partitioned .hdf support: LoadFile() populates mPartitions when
     // an RDB is found. Until a specific partition name is navigated into,
@@ -59,7 +65,13 @@ protected:
     bool ResolveImage(const std::wstring& pPath, firy::spImage& pOutImage, std::string& pOutInner);
 
     std::wstring GetInnerPath(const std::wstring& pPath);
-    std::string InnerPathUtf8(const std::wstring& pPath);
+
+    void Invalidate();
+    bool IsWritable(const firy::spImage& pImage) const;
+    bool NewEntryName(const firy::spImage& pImage, const std::wstring& pName, const bool pIsDir, std::string& pOut, int& pD64Type);
+    firy::spNode FindEntry(const firy::spImage& pImage, const firy::spDirectory& pDir, const std::string& pName);
+    size_t BlocksNeeded(const firy::spImage& pImage, const size_t pBytes);
+    size_t BlocksFree(const firy::spImage& pImage);
 
 public:
     cFiryPluginData();

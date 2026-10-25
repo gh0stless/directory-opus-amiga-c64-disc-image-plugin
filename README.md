@@ -9,8 +9,12 @@ does the actual image parsing.
 
 ## Features
 
-* Browse, read, delete and import files/folders inside disk images, same as
-  a real folder in the Lister
+* Browse and read files/folders inside disk images, same as a real folder
+  in the Lister
+* Copy files and folders into, and delete them from, `.adf`/`.hdf` (OFS and
+  FFS, international or not) and `.d64`/`.d71`/`.d81` images. Changes are
+  written straight back to the image file. `.dms`, FAT and ISO9660 images
+  are read-only
 * Amiga: `.adf` / `.fdi` / `.hdf` (including RDB-partitioned hard disk
   images, multiple partitions shown as folders) and `.dms` archives
 * Commodore 64: `.d64` / `.d71` / `.d81`
@@ -54,11 +58,13 @@ with firy.
 ```
 git clone https://github.com/gh0stless/directory-opus-amiga-c64-disc-image-plugin.git
 git clone https://github.com/segrax/firy.git
-git -C firy apply ../directory-opus-amiga-c64-disc-image-plugin/patches/firy-d64-accept-any-dos-type.patch
+git -C firy apply ../directory-opus-amiga-c64-disc-image-plugin/patches/firy-plugin-fixes.patch
 ```
 
-The patch in `patches/` fixes a firy bug that refused to open D64/D71/D81
-images whose disk DOS type isn't the stock `2A`/`3D`; release builds include it.
+The patch series in `patches/firy-plugin-fixes.patch` fixes firy bugs the
+plugin depends on - D64/D71/D81 images with a non-stock DOS type not
+opening, and the write paths for CBM and Amiga images (each patch in the
+file has its own description). Release builds include them.
 
 With both checked out next to each other, open `opusADF.sln` and build
 `Release|x64`. Output is `x64\Release\opusAmigaDisc.dll`.
@@ -68,6 +74,30 @@ With both checked out next to each other, open `opusADF.sln` and build
 Copy `opusAmigaDisc.dll` into Directory Opus's `VFSPlugins` folder (usually
 `C:\Program Files\GPSoftware\Directory Opus\VFSPlugins`), then restart Opus
 or refresh plugins.
+
+## Writing into images
+
+* Names must fit the format: up to 30 Latin-1 characters on Amiga volumes,
+  up to 16 printable ASCII characters on CBM disks (stored upper-case). A name
+  that doesn't fit is refused rather than shortened, so two long names can't
+  end up as the same entry.
+* On CBM disks a `.prg`, `.seq` or `.usr` extension picks the file type and
+  is dropped from the name; anything else becomes a PRG file. CBM disks have
+  no folders.
+* Copying onto an existing name replaces it (Opus asks first, as usual).
+  Copying a folder onto an existing folder merges into it.
+* If there isn't enough space, the copy fails before anything is written -
+  also when replacing, where the old file stays in place.
+* Directory cache (DCFS) Amiga volumes are read-only, since the cache isn't
+  maintained. REL and GEOS files on CBM disks can't be deleted.
+
+## Testing
+
+`tests/` holds an end-to-end test that drives the built DLL through its VFS
+exports the way Opus does, and checks every modified image with independent
+tools: amitools' `xdfscan`/`xdftool` for Amiga images and `cbmcheck.py` (BAM,
+directory and file chains) plus the `d64` Python package for CBM disks. See
+`tests/README.md`.
 
 ## Known limitations (beta)
 
