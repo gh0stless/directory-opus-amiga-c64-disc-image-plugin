@@ -105,3 +105,6 @@ directory and file chains) plus the `d64` Python package for CBM disks. See
 * No UI for creating a partitioned .hdf or an RDB from scratch (read/import/
   delete into existing partitions works)
 * Rename and SetAttr aren't implemented
+* Files whose Amiga/C64 name is a reserved device name on Windows (`AUX`,
+  `CON`, `PRN`, `NUL`, `COM1`, ...) can't be copied out; the rest of the
+  folder still is, and the copy reports an error at the end

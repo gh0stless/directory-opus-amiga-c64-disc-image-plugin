@@ -1082,14 +1082,22 @@ int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring
     if (!ResolveImage(pPath, image, inner))
         return 1;
 
+    // A file that can't be copied (eg. an Amiga "AUX" - a reserved device name
+    // on Windows) doesn't stop the rest of the folder; the first error is
+    // reported at the end. Only an abort by the user stops early.
     int result = 0;
+    auto extractChild = [&](const std::wstring& pName) {
+        int childResult = Extract(lpBatchData, PathJoin(pPath, pName), pDest);
+        if (childResult && !result)
+            result = childResult;
+        return childResult != ERROR_CANCELLED;
+    };
 
     if (!image) {
         // Extracting the .hdf root: recurse into each partition.
         auto partitions = mPartitions;
         for (auto& part : partitions) {
-            result = Extract(lpBatchData, PathJoin(pPath, s2ws(part.mName)), pDest);
-            if (result)
+            if (!extractChild(s2ws(part.mName)))
                 break;
         }
         return result;
@@ -1102,8 +1110,7 @@ int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring
     // Copy the list: extracting may reload the image and with it the directory
     auto nodes = dir->mNodes;
     for (auto& node : nodes) {
-        result = Extract(lpBatchData, PathJoin(pPath, s2ws(node->nameGet())), pDest);
-        if (result)
+        if (!extractChild(s2ws(node->nameGet())))
             break;
     }
 
