@@ -8,6 +8,20 @@ HINSTANCE g_hModuleInstance = 0;
 
 extern std::wstring s2ws(const std::string& str);
 
+// Exceptions must never cross into Opus: firy throws on some corrupt-image
+// paths (and std::bad_alloc is always possible), and an exception escaping a
+// plugin export takes the whole Opus process down with it.
+template <class tResult, class tFunc> tResult Guarded(tResult pFailure, tFunc pFunc) {
+    try {
+        return pFunc();
+    }
+    catch (...) {
+        return pFailure;
+    }
+}
+
+#define PLUGIN(h) ((cFiryPluginData*)(h))
+
 extern "C"
 {
     __declspec(dllexport) bool VFS_IdentifyW(LPVFSPLUGININFOW lpVFSInfo);
@@ -56,7 +70,7 @@ bool VFS_IdentifyW(LPVFSPLUGININFOW lpVFSInfo) {
     // Initialise plugin information
     lpVFSInfo->idPlugin = GUIDPlugin_Firy;
     lpVFSInfo->dwFlags = VFSF_CANCONFIGURE | VFSF_NONREENTRANT;
-    lpVFSInfo->dwCapabilities = VFSCAPABILITY_CASESENSITIVE | VFSCAPABILITY_POSTCOPYREREAD;
+    lpVFSInfo->dwCapabilities = VFSCAPABILITY_CASESENSITIVE | VFSCAPABILITY_POSTCOPYREREAD | VFSCAPABILITY_READONLY;
 
     std::wstring Extensions;
     for (auto& ext : firy::cFiry::getKnownExtensions()) {
@@ -80,39 +94,52 @@ bool VFS_USBSafe(LPOPUSUSBSAFEDATA pUSBSafeData) {
 }
 
 HANDLE VFS_Create(LPGUID pGuid) {
-    return (HANDLE)new cFiryPluginData();
+    return Guarded((HANDLE)0, [&] { return (HANDLE)new cFiryPluginData(); });
 }
 
 void VFS_Destroy(HANDLE hData) {
-    delete (cFiryPluginData*)hData;
+    Guarded(0, [&] { delete PLUGIN(hData); return 0; });
 }
 
 bool VFS_ReadFile(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFile, LPVOID lpData, DWORD dwSize, LPDWORD lpdwReadSize) {
-    return (hData) ? ((cFiryPluginData*)hData)->ReadFile(hFile, dwSize, (std::uint8_t*)lpData, lpdwReadSize) : false;
+    if (!hData)
+        return false;
+    return Guarded(false, [&] { return PLUGIN(hData)->ReadFile(hFile, dwSize, (std::uint8_t*)lpData, lpdwReadSize); });
 }
 
 void VFS_CloseFile(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFile) {
-    ((cFiryPluginData*)hData)->CloseFile(hFile);
+    if (hData)
+        Guarded(0, [&] { PLUGIN(hData)->CloseFile(hFile); return 0; });
 }
 
 HANDLE VFS_CreateFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, DWORD dwMode, DWORD dwFileAttr, DWORD dwFlags, LPFILETIME lpFT) {
-    return (hData) ? ((cFiryPluginData*)hData)->OpenFile(lpszPath) : 0;
+    if (!hData)
+        return INVALID_HANDLE_VALUE;
+    return Guarded(INVALID_HANDLE_VALUE, [&] { return PLUGIN(hData)->OpenFile(lpszPath); });
 }
 
 bool VFS_ReadDirectoryW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPVFSREADDIRDATAW lpRDD) {
-    return (hData) ? ((cFiryPluginData*)hData)->ReadDirectory(lpRDD) : false;
+    if (!hData)
+        return false;
+    return Guarded(false, [&] { return PLUGIN(hData)->ReadDirectory(lpRDD); });
 }
 
 int VFS_ContextVerbW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPVFSCONTEXTVERBDATAW lpVerbData) {
-    return (hData) ? ((cFiryPluginData*)hData)->ContextVerb(lpVerbData) : VFSCVRES_FAIL;
+    if (!hData)
+        return VFSCVRES_FAIL;
+    return Guarded((int)VFSCVRES_FAIL, [&] { return PLUGIN(hData)->ContextVerb(lpVerbData); });
 }
 
 UINT VFS_BatchOperationW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, LPVFSBATCHDATAW lpBatchData) {
-    return (hData) ? ((cFiryPluginData*)hData)->BatchOperation(lpszPath, lpBatchData) : VFSCVRES_FAIL;
+    if (!hData)
+        return VFSBATCHRES_ABORT;
+    return Guarded((UINT)VFSBATCHRES_ABORT, [&] { return PLUGIN(hData)->BatchOperation(lpszPath, lpBatchData); });
 }
 
 bool VFS_PropGetW(HANDLE hData, vfsProperty propId, LPVOID lpPropData, LPVOID lpData1, LPVOID lpData2, LPVOID lpData3) {
-    return (hData) ? ((cFiryPluginData*)hData)->PropGet(propId, lpPropData, lpData1, lpData2, lpData3) : VFSCVRES_FAIL;
+    if (!hData)
+        return false;
+    return Guarded(false, [&] { return PLUGIN(hData)->PropGet(propId, lpPropData, lpData1, lpData2, lpData3); });
 }
 
 bool VFS_GetFreeDiskSpaceW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPWSTR lpszPath, unsigned __int64* piFreeBytesAvailable, unsigned __int64* piTotalBytes, unsigned __int64* piTotalFreeBytes) {
@@ -120,26 +147,39 @@ bool VFS_GetFreeDiskSpaceW(HANDLE hData, LPVFSFUNCDATA lpFuncData, LPWSTR lpszPa
     if (!hData)
         return false;
 
-    if (piFreeBytesAvailable)
-        *piFreeBytesAvailable = ((cFiryPluginData*)hData)->TotalFreeBlocks(lpszPath);
+    return Guarded(false, [&] {
+        auto plugin = PLUGIN(hData);
+        size_t free = plugin->TotalFreeBlocks(lpszPath);
 
-    if (piTotalFreeBytes)
-        *piTotalFreeBytes = ((cFiryPluginData*)hData)->TotalFreeBlocks(lpszPath);
+        if (piFreeBytesAvailable)
+            *piFreeBytesAvailable = free;
 
-    if (piTotalBytes)
-        *piTotalBytes = ((cFiryPluginData*)hData)->TotalDiskBlocks(lpszPath);
+        if (piTotalFreeBytes)
+            *piTotalFreeBytes = free;
 
-    return true;
+        if (piTotalBytes)
+            *piTotalBytes = plugin->TotalDiskBlocks(lpszPath);
+
+        return true;
+    });
 }
 
 HANDLE VFS_FindFirstFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, LPWSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent) {
-    return (hData) ? (HANDLE)((cFiryPluginData*)hData)->FindFirstFile(lpszPath, lpwfdData, hAbortEvent) : INVALID_HANDLE_VALUE;
+    if (!hData)
+        return INVALID_HANDLE_VALUE;
+    return Guarded(INVALID_HANDLE_VALUE, [&] {
+        auto find = PLUGIN(hData)->FindFirstFile(lpszPath, lpwfdData, hAbortEvent);
+        return find ? (HANDLE)find : INVALID_HANDLE_VALUE;
+    });
 }
 
 bool VFS_FindNextFileW(HANDLE hData, LPVFSFUNCDATA lpVFSData, HANDLE hFind, LPWIN32_FIND_DATA lpwfdData) {
-    return (hData && hFind) ? ((cFiryPluginData*)hData)->FindNextFile((cFiryFindData*)hFind, lpwfdData) : false;
+    if (!hData || !hFind || hFind == INVALID_HANDLE_VALUE)
+        return false;
+    return Guarded(false, [&] { return PLUGIN(hData)->FindNextFile((cFiryFindData*)hFind, lpwfdData); });
 }
 
 void VFS_FindClose(HANDLE hData, HANDLE hFind) {
-    if (hData && hFind) ((cFiryPluginData*)hData)->FindClose((cFiryFindData*)hFind);
+    if (hData && hFind && hFind != INVALID_HANDLE_VALUE)
+        Guarded(0, [&] { PLUGIN(hData)->FindClose((cFiryFindData*)hFind); return 0; });
 }

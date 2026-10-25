@@ -7,27 +7,20 @@
 
 DOpusPluginHelperFunction DOpus;
 
-// Converts a narrow string coming out of firy - always raw bytes read
-// straight off a disk image (a filename, a partition name, or a path built
-// by concatenating those) - into the wide string Opus expects.
+// Converts a name read straight off a disk image (a filename, a partition
+// name, or a path built by concatenating those) into the wide string Opus
+// expects.
 //
 // This is NOT UTF-8. Amiga filenames are native single-byte text: the
 // Amiga's own character set is ISO-8859-1/Latin-1 for the accented range
-// (confirmed against firy's cADF entry parser, which just memcpy's the raw
-// on-disk name bytes into a std::string with no charset conversion of its
-// own - see adf.cpp's node name assignment). Standard Commodore PETSCII, as
-// used by D64/D71/D81, has no umlaut characters in its filename charset at
-// all in practice, so there's no "correct" table entry for those bytes
-// either way - decoding them as Latin-1 as well is at least a harmless,
-// well-defined choice for the rare/nonstandard disk that has one, rather
-// than a wrong one.
+// (firy's cADF entry parser just memcpy's the raw on-disk name bytes into a
+// std::string with no charset conversion of its own). Standard Commodore
+// PETSCII, as used by D64/D71/D81, has no umlaut characters in its filename
+// charset at all in practice, so decoding those bytes as Latin-1 as well is
+// at least a harmless, well-defined choice.
 //
 // Because ISO-8859-1's 256 code points map 1:1 onto Unicode's first 256
-// code points, "decoding" it is just a per-byte widen - no codepage
-// table/API lookup needed, and (unlike the previous CP_UTF8 decode this
-// replaced) it can never fail or produce U+FFFD replacement characters: a
-// German umlaut byte like 0xE4 ('ä') used to be an invalid lone UTF-8
-// continuation byte and got mangled; here it directly becomes L'ä'.
+// code points, "decoding" it is just a per-byte widen.
 std::wstring s2ws(const std::string& str) {
     std::wstring result;
     result.reserve(str.size());
@@ -36,38 +29,114 @@ std::wstring s2ws(const std::string& str) {
     return result;
 }
 
-std::string ws2s(const std::wstring& wstr) {
-    if (wstr.empty())
-        return std::string();
+// The reverse of s2ws: a name coming from Opus, as the bytes it has (or
+// will have) inside the image. Fails for characters outside Latin-1, which
+// can't exist inside an image, so a lookup for them can never match and a
+// new entry can't be created with them.
+bool ImageName(const std::wstring& pName, std::string& pOut) {
+    pOut.clear();
+    pOut.reserve(pName.size());
+    for (wchar_t ch : pName) {
+        if (ch > 0xFF)
+            return false;
+        pOut.push_back(static_cast<char>(ch));
+    }
+    return true;
+}
 
-    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), 0, 0, 0, 0);
-    std::string result(len, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], len, 0, 0);
+// A Windows path for firy's file API. firy opens files through
+// std::ifstream/std::filesystem with a narrow std::string, which MSVC
+// interprets in the ANSI code page (not UTF-8), so convert to exactly that.
+// A path the ANSI code page can't represent (eg. Japanese folder names on a
+// German system) falls back to its 8.3 short form, which is plain ASCII.
+std::string HostPath(const std::wstring& pPath) {
+    auto convert = [](const std::wstring& pWide, bool& pLossy) {
+        pLossy = false;
+        if (pWide.empty())
+            return std::string();
+
+        const UINT codePage = GetACP();
+        BOOL usedDefault = FALSE;
+        // CP_UTF8 doesn't allow the lossy-check flags (and is never lossy)
+        const bool utf8 = (codePage == CP_UTF8);
+        int len = WideCharToMultiByte(codePage, utf8 ? 0 : WC_NO_BEST_FIT_CHARS, pWide.c_str(), (int)pWide.size(), 0, 0, 0, utf8 ? 0 : &usedDefault);
+        std::string result(len, 0);
+        WideCharToMultiByte(codePage, utf8 ? 0 : WC_NO_BEST_FIT_CHARS, pWide.c_str(), (int)pWide.size(), &result[0], len, 0, utf8 ? 0 : &usedDefault);
+        pLossy = usedDefault != FALSE;
+        return result;
+    };
+
+    bool lossy;
+    auto result = convert(pPath, lossy);
+    if (!lossy)
+        return result;
+
+    DWORD len = GetShortPathNameW(pPath.c_str(), 0, 0);
+    if (len) {
+        std::wstring shortPath(len, 0);
+        len = GetShortPathNameW(pPath.c_str(), &shortPath[0], len);
+        shortPath.resize(len);
+        auto shortResult = convert(shortPath, lossy);
+        if (!lossy)
+            return shortResult;
+    }
+
     return result;
+}
+
+bool ReadHostFile(const std::wstring& pPath, firy::spBuffer& pOut) {
+    HANDLE hFile = CreateFileW(pPath.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+
+    LARGE_INTEGER size;
+    bool ok = GetFileSizeEx(hFile, &size) && size.QuadPart < 0x7fffffff;
+    pOut = std::make_shared<firy::tBuffer>();
+    if (ok && size.QuadPart) {
+        pOut->resize((size_t)size.QuadPart);
+        DWORD read = 0;
+        ok = ::ReadFile(hFile, pOut->data(), (DWORD)size.QuadPart, &read, 0) && read == (DWORD)size.QuadPart;
+    }
+
+    CloseHandle(hFile);
+    return ok;
+}
+
+bool WriteHostFile(const std::wstring& pPath, const firy::spBuffer& pData) {
+    HANDLE hFile = CreateFileW(pPath.c_str(), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+
+    bool ok = true;
+    if (pData && pData->size()) {
+        DWORD written = 0;
+        ok = ::WriteFile(hFile, pData->data(), (DWORD)pData->size(), &written, 0) && written == (DWORD)pData->size();
+    }
+
+    CloseHandle(hFile);
+    if (!ok)
+        DeleteFileW(pPath.c_str());
+    return ok;
 }
 
 /**
  * Builds a safe regex from a DOS-style wildcard mask (only '*' and '?' are
  * treated specially, everything else - including regex metacharacters that
  * are common in real Amiga filenames like '(', ')', '+', '[' - is escaped
- * literally). Never throws: a name is not a trusted regex pattern, unlike
- * the previous "(." + name + ")" construction which could take an
- * std::regex_error straight across the DLL boundary into Opus on a name
- * like "Setup(Beta" or "C++". Also fixes exact (non-wildcard) lookups,
- * which the old "always one leading char" pattern could never match.
+ * literally). Never throws: a name is not a trusted regex pattern.
  */
-std::regex BuildWildcardRegex(const std::wstring& pMask) {
-    std::string pattern = "^";
+std::wregex BuildWildcardRegex(const std::wstring& pMask) {
+    std::wstring pattern = L"^";
 
-    for (char ch : ws2s(pMask)) {
-        if (ch == '*') {
-            pattern += ".*";
+    for (wchar_t ch : pMask) {
+        if (ch == L'*') {
+            pattern += L".*";
         }
-        else if (ch == '?') {
-            pattern += '.';
+        else if (ch == L'?') {
+            pattern += L'.';
         }
-        else if (strchr(".^$|()[]{}+\\", ch)) {
-            pattern += '\\';
+        else if (wcschr(L".^$|()[]{}+\\", ch)) {
+            pattern += L'\\';
             pattern += ch;
         }
         else {
@@ -75,15 +144,15 @@ std::regex BuildWildcardRegex(const std::wstring& pMask) {
         }
     }
 
-    pattern += "$";
+    pattern += L"$";
 
     try {
-        return std::regex(pattern, std::regex::icase);
+        return std::wregex(pattern, std::regex::icase);
     }
     catch (const std::regex_error&) {
         // Should be unreachable given the escaping above, but never let a
         // malformed mask take the whole process down.
-        return std::regex(std::string());
+        return std::wregex(std::wstring());
     }
 }
 
@@ -103,6 +172,13 @@ std::vector<std::wstring> tokenize(const std::wstring& in, const std::wstring& d
     return tokens;
 }
 
+std::wstring PathJoin(const std::wstring& pPath, const std::wstring& pName) {
+    std::wstring result = pPath;
+    if (!result.empty() && result.back() != L'\\')
+        result += L'\\';
+    return result + pName;
+}
+
 cFiryPluginData::cFiryPluginData() {
     mLastError = 0;
 }
@@ -112,7 +188,7 @@ cFiryPluginData::~cFiryPluginData() {
 }
 
 FILETIME cFiryPluginData::GetFileTime(const firy::helpers::sDateTime& pDT) {
-    SYSTEMTIME LocalTime = {}, UTCTime;
+    SYSTEMTIME LocalTime = {}, UTCTime = {};
     LocalTime.wYear = (WORD)pDT.year;
     LocalTime.wMonth = (WORD)pDT.month;
     LocalTime.wDay = (WORD)pDT.days;
@@ -120,16 +196,18 @@ FILETIME cFiryPluginData::GetFileTime(const firy::helpers::sDateTime& pDT) {
     LocalTime.wMinute = (WORD)pDT.mins;
     LocalTime.wSecond = (WORD)pDT.secs;
 
-    TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UTCTime);
-    FILETIME ft;
-    SystemTimeToFileTime(&UTCTime, &ft);
+    FILETIME ft = {};
+    // Images without real dates (or with garbage in them) get no date at all
+    // rather than whatever was left on the stack
+    if (!TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UTCTime) || !SystemTimeToFileTime(&UTCTime, &ft))
+        return {};
     return ft;
 }
 
 firy::helpers::sDateTime cFiryPluginData::ToDateTime(FILETIME pFT) {
     SYSTEMTIME UTCTime, LocalTime;
-    FileTimeToSystemTime(&pFT, &UTCTime);
-    SystemTimeToTzSpecificLocalTime(NULL, &UTCTime, &LocalTime);
+    if (!FileTimeToSystemTime(&pFT, &UTCTime) || !SystemTimeToTzSpecificLocalTime(NULL, &UTCTime, &LocalTime))
+        return firy::helpers::sDateTime();
 
     return firy::helpers::sDateTime(LocalTime.wYear, LocalTime.wMonth, LocalTime.wDay, LocalTime.wHour, LocalTime.wMinute, LocalTime.wSecond);
 }
@@ -137,6 +215,7 @@ firy::helpers::sDateTime cFiryPluginData::ToDateTime(FILETIME pFT) {
 void cFiryPluginData::GetWfdForEntry(const firy::spNode& pEntry, LPWIN32_FIND_DATA pData) {
     auto filename = s2ws(pEntry->nameGet());
     StringCchCopyW(pData->cFileName, MAX_PATH, filename.c_str());
+    pData->cAlternateFileName[0] = 0;
 
     pData->nFileSizeHigh = 0;
     pData->nFileSizeLow = (DWORD)pEntry->sizeInBytesGet();
@@ -176,6 +255,7 @@ LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforEntry(const firy::spNode& pEntry, 
 void cFiryPluginData::GetWfdForPartition(const sPartitionInfo& pPart, LPWIN32_FIND_DATA pData) {
     auto filename = s2ws(pPart.mName);
     StringCchCopyW(pData->cFileName, MAX_PATH, filename.c_str());
+    pData->cAlternateFileName[0] = 0;
 
     pData->nFileSizeHigh = 0;
     pData->nFileSizeLow = 0;
@@ -212,35 +292,52 @@ LPVFSFILEDATAHEADER cFiryPluginData::GetVFSforPartition(const sPartitionInfo& pP
 }
 
 /**
+ * Drop everything cached about the current image, so the next access reads
+ * it fresh from disk. Used after a failed write, which may have left firy's
+ * in-memory copy half-modified.
+ */
+void cFiryPluginData::Invalidate() {
+    mImage.reset();
+    mImagePath.clear();
+    mIsPartitioned = false;
+    mPartitions.clear();
+    mPartitionImage.reset();
+    mActivePartition.clear();
+}
+
+/**
  * Split a full VFS path into the on-disk image file and the path inside it,
- * by looking for the earliest occurrence of any extension firy knows about
- * (plus .dms, which firy doesn't know). Also checks for an RDB partition
- * table, since real .hdf files almost always have one.
+ * by looking for the earliest image extension (any firy knows about, plus
+ * .dms) that ends a path component. Also checks for an RDB partition table,
+ * since real .hdf files almost always have one.
  */
 bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     std::wstring Lower = pPath;
     std::transform(Lower.begin(), Lower.end(), Lower.begin(), ::towlower);
 
     // Extensions firy can open directly, plus .dms, which we unpack to an
-    // in-memory ADF ourselves before handing it to firy (firy doesn't know
-    // about DMS and isn't touched to teach it).
+    // in-memory ADF ourselves before handing it to firy.
     auto Extensions = firy::cFiry::getKnownExtensions();
     Extensions.push_back("dms");
 
-    size_t BestPos = std::wstring::npos;
     size_t BestEnd = std::wstring::npos;
     std::wstring BestExt;
 
     for (auto& ext : Extensions) {
         std::wstring DotExt = L"." + s2ws(ext);
-        size_t Pos = Lower.find(DotExt);
-        if (Pos == std::wstring::npos)
-            continue;
 
-        if (BestPos == std::wstring::npos || Pos < BestPos) {
-            BestPos = Pos;
-            BestEnd = Pos + DotExt.size();
-            BestExt = s2ws(ext);
+        // Only an extension that ends a path component counts - "game.adf.dms"
+        // is a DMS file, "C:\disks.d64\x.d64" has its image at the end
+        for (size_t Pos = Lower.find(DotExt); Pos != std::wstring::npos; Pos = Lower.find(DotExt, Pos + 1)) {
+            size_t End = Pos + DotExt.size();
+            if (End != Lower.size() && Lower[End] != L'\\' && Lower[End] != L'/')
+                continue;
+
+            if (End < BestEnd) {
+                BestEnd = End;
+                BestExt = s2ws(ext);
+            }
+            break;
         }
     }
 
@@ -252,16 +349,12 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     if ((mImage || mIsPartitioned) && mImagePath == ImagePath)
         return true;
 
-    mImage.reset();
-    mIsPartitioned = false;
-    mPartitions.clear();
-    mPartitionImage.reset();
-    mActivePartition.clear();
+    Invalidate();
 
     // Real hard-disk images are almost always RDB-partitioned (unlike
     // floppy .adf images), so check for that first regardless of
     // extension - it's cheap (a handful of small reads).
-    auto partitions = ParseRDB(ws2s(ImagePath));
+    auto partitions = ParseRDB(HostPath(ImagePath));
     if (!partitions.empty()) {
         mIsPartitioned = true;
         mPartitions = std::move(partitions);
@@ -272,8 +365,8 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
     firy::spImage image;
 
     if (BestExt == L"dms") {
-        auto raw = firy::gResources->FileRead(ws2s(ImagePath));
-        if (!raw)
+        firy::spBuffer raw;
+        if (!ReadHostFile(ImagePath, raw))
             return false;
 
         std::vector<uint8_t> rawBytes(raw->data(), raw->data() + raw->size());
@@ -285,7 +378,7 @@ bool cFiryPluginData::LoadFile(const std::wstring& pPath) {
         image = firy::gFiry->openImageFile<firy::images::cADF>(source);
     }
     else {
-        image = firy::gFiry->openImage(ws2s(ImagePath));
+        image = firy::gFiry->openImage(HostPath(ImagePath));
     }
 
     if (!image)
@@ -304,7 +397,7 @@ bool cFiryPluginData::OpenPartition(const std::string& pName) {
         if (part.mName != pName)
             continue;
 
-        auto source = std::make_shared<cOffsetSource>(ws2s(mImagePath), part.mOffset, part.mSize);
+        auto source = std::make_shared<cOffsetSource>(HostPath(mImagePath), part.mOffset, part.mSize);
         auto image = firy::gFiry->openImageFile<firy::images::cADF>(source);
         if (!image)
             return false;
@@ -321,14 +414,25 @@ bool cFiryPluginData::ResolveImage(const std::wstring& pPath, firy::spImage& pOu
     if (!LoadFile(pPath))
         return false;
 
+    std::string inner;
+    if (!ImageName(GetInnerPath(pPath), inner))
+        return false; // characters that can't exist inside an image
+
     if (!mIsPartitioned) {
         pOutImage = mImage;
-        pOutInner = InnerPathUtf8(pPath);
+        pOutInner = inner;
         return true;
     }
 
-    auto inner = GetInnerPath(pPath);
-    auto depth = tokenize(inner, L"/");
+    std::vector<std::string> depth;
+    for (size_t pos = 0; pos <= inner.size();) {
+        size_t end = inner.find('/', pos);
+        if (end == std::string::npos)
+            end = inner.size();
+        if (end > pos)
+            depth.push_back(inner.substr(pos, end - pos));
+        pos = end + 1;
+    }
 
     if (depth.empty()) {
         // The .hdf root itself - the caller works with mPartitions directly.
@@ -337,15 +441,15 @@ bool cFiryPluginData::ResolveImage(const std::wstring& pPath, firy::spImage& pOu
         return true;
     }
 
-    if (!OpenPartition(ws2s(depth[0])))
+    if (!OpenPartition(depth[0]))
         return false;
 
-    std::wstring rest;
+    std::string rest;
     for (size_t i = 1; i < depth.size(); i++)
-        rest += L"/" + depth[i];
+        rest += "/" + depth[i];
 
     pOutImage = mPartitionImage;
-    pOutInner = ws2s(rest);
+    pOutInner = rest;
     return true;
 }
 
@@ -357,10 +461,6 @@ std::wstring cFiryPluginData::GetInnerPath(const std::wstring& pPath) {
 
     std::replace(Remainder.begin(), Remainder.end(), L'\\', L'/');
     return Remainder;
-}
-
-std::string cFiryPluginData::InnerPathUtf8(const std::wstring& pPath) {
-    return ws2s(GetInnerPath(pPath));
 }
 
 bool cFiryPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
@@ -430,7 +530,7 @@ bool cFiryPluginData::ReadDirectory(LPVFSREADDIRDATAW lpRDD) {
 
 bool cFiryPluginData::ReadFile(HANDLE hFile, size_t pBytes, std::uint8_t* pBuffer, LPDWORD pReadSize) {
 
-    auto handle = (sFiryFileHandle*)hFile;
+    auto handle = (hFile == INVALID_HANDLE_VALUE) ? nullptr : (sFiryFileHandle*)hFile;
     if (!handle || !handle->mBuffer) {
         *pReadSize = 0;
         return false;
@@ -445,7 +545,8 @@ bool cFiryPluginData::ReadFile(HANDLE hFile, size_t pBytes, std::uint8_t* pBuffe
     handle->mOffset += ToRead;
     *pReadSize = (DWORD)ToRead;
 
-    return ToRead > 0;
+    // Like ReadFile(): reaching the end is success with zero bytes, not an error
+    return true;
 }
 
 HANDLE cFiryPluginData::OpenFile(std::wstring pPath) {
@@ -453,21 +554,26 @@ HANDLE cFiryPluginData::OpenFile(std::wstring pPath) {
     firy::spImage image;
     std::string inner;
     if (!ResolveImage(pPath, image, inner) || !image)
-        return 0;
+        return INVALID_HANDLE_VALUE;
 
     auto file = image->filesystemFile(inner);
     if (!file)
-        return 0;
+        return INVALID_HANDLE_VALUE;
+
+    auto content = file->read();
+    if (!content)
+        return INVALID_HANDLE_VALUE;
 
     auto handle = new sFiryFileHandle();
     handle->mFile = file;
-    handle->mBuffer = file->read();
+    handle->mBuffer = content;
 
     return (HANDLE)handle;
 }
 
 void cFiryPluginData::CloseFile(HANDLE hFile) {
-    delete (sFiryFileHandle*)hFile;
+    if (hFile && hFile != INVALID_HANDLE_VALUE)
+        delete (sFiryFileHandle*)hFile;
 }
 
 int cFiryPluginData::ContextVerb(LPVFSCONTEXTVERBDATAW lpVerbData) {
@@ -487,38 +593,10 @@ int cFiryPluginData::ContextVerb(LPVFSCONTEXTVERBDATAW lpVerbData) {
     return node->isDirectory() ? VFSCVRES_DEFAULT : VFSCVRES_EXTRACT;
 }
 
-int cFiryPluginData::Delete(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pFile) {
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)"Deleting");
-
-    if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
-        return 1;
-
-    firy::spImage image;
-    std::string inner;
-    if (!ResolveImage(pFile, image, inner) || !image)
-        return 1; // can't delete a partition itself
-
-    auto node = image->filesystemNode(inner);
-    if (!node)
-        return 1;
-
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)node->nameGet().c_str());
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)node->sizeInBytesGet());
-
-    // firy's sNode::remove() already tears down whole sub-trees recursively
-    if (!node->remove())
-        return 1;
-
-    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_REMDIR, pFile.c_str());
-    return 0;
-}
-
 cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent) {
 
-    cFiryFindData* findData = new cFiryFindData();
-
     if (!LoadFile(lpszPath))
-        return findData;
+        return 0;
 
     auto Inner = GetInnerPath(lpszPath);
     auto Depth = tokenize(Inner, L"/");
@@ -537,41 +615,25 @@ cFiryFindData* cFiryPluginData::FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA
     firy::spImage image;
     std::string parentInner;
     if (!ResolveImage(ParentPath, image, parentInner))
-        return findData;
+        return 0;
 
+    std::unique_ptr<cFiryFindData> findData(new cFiryFindData());
     findData->mFindMask = BuildWildcardRegex(FileMask);
 
     if (!image) {
         findData->mIsPartitionLevel = true;
-
-        while (findData->mIndex < mPartitions.size()) {
-            auto& part = mPartitions[findData->mIndex];
-            findData->mIndex++;
-
-            if (std::regex_match(part.mName, findData->mFindMask)) {
-                GetWfdForPartition(part, lpwfdData);
-                break;
-            }
-        }
-        return findData;
+    }
+    else {
+        findData->mDirectory = image->filesystemPath(parentInner);
+        if (!findData->mDirectory)
+            return 0;
     }
 
-    auto parentDir = image->filesystemPath(parentInner);
-    if (parentDir) {
-        findData->mDirectory = parentDir;
+    // Like FindFirstFile(): no match means no handle at all
+    if (!FindNextFile(findData.get(), lpwfdData))
+        return 0;
 
-        while (findData->mIndex < parentDir->mNodes.size()) {
-            auto& node = parentDir->mNodes[findData->mIndex];
-            findData->mIndex++;
-
-            if (std::regex_match(node->nameGet(), findData->mFindMask)) {
-                GetWfdForEntry(node, lpwfdData);
-                break;
-            }
-        }
-    }
-
-    return findData;
+    return findData.release();
 }
 
 bool cFiryPluginData::FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA lpwfdData) {
@@ -581,7 +643,7 @@ bool cFiryPluginData::FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA l
             auto& part = mPartitions[pFindData->mIndex];
             pFindData->mIndex++;
 
-            if (std::regex_match(part.mName, pFindData->mFindMask)) {
+            if (std::regex_match(s2ws(part.mName), pFindData->mFindMask)) {
                 GetWfdForPartition(part, lpwfdData);
                 return true;
             }
@@ -596,7 +658,7 @@ bool cFiryPluginData::FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA l
         auto& node = pFindData->mDirectory->mNodes[pFindData->mIndex];
         pFindData->mIndex++;
 
-        if (std::regex_match(node->nameGet(), pFindData->mFindMask)) {
+        if (std::regex_match(s2ws(node->nameGet()), pFindData->mFindMask)) {
             GetWfdForEntry(node, lpwfdData);
             return true;
         }
@@ -609,144 +671,6 @@ void cFiryPluginData::FindClose(cFiryFindData* pFindData) {
     delete pFindData;
 }
 
-int cFiryPluginData::ImportFile(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
-
-    auto Depth = tokenize(pPath, L"\\/");
-    std::wstring ItemName = Depth.empty() ? pPath : Depth.back();
-
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILENAME, (DWORD_PTR)ItemName.c_str());
-
-    auto content = firy::gResources->FileRead(ws2s(pPath));
-    if (!content)
-        return 1;
-
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_SETFILESIZE, (DWORD_PTR)content->size());
-
-    firy::spImage image;
-    std::string inner;
-    if (!ResolveImage(pFile, image, inner) || !image)
-        return 1; // can't import directly onto the partition-list level
-
-    auto parentDir = image->filesystemPath(inner);
-    if (!parentDir)
-        return 1;
-
-    auto newFile = image->filesystemFileCreate(ws2s(ItemName));
-    if (!newFile)
-        return 1;
-
-    newFile->mContent = content;
-    newFile->sizeInBytesSet(content->size());
-
-    FILETIME ft;
-    HANDLE hSrc = CreateFile(pPath.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    ::GetFileTime(hSrc, 0, 0, &ft);
-    CloseHandle(hSrc);
-
-    auto dt = ToDateTime(ft);
-    newFile->timeWriteSet(dt);
-
-    if (!parentDir->add(newFile))
-        return 1;
-
-    std::wstring Final = pFile;
-    if (Final[Final.size() - 1] != L'\\')
-        Final += L"\\";
-    Final += ItemName;
-
-    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_CREATE, Final.c_str());
-    return 0;
-}
-
-std::vector<std::wstring> directoryList(const std::wstring pPath) {
-    WIN32_FIND_DATA fdata;
-    HANDLE dhandle;
-    std::vector<std::wstring> results;
-
-    if ((dhandle = ::FindFirstFile(pPath.c_str(), &fdata)) == INVALID_HANDLE_VALUE)
-        return results;
-
-    results.push_back(std::wstring(fdata.cFileName));
-
-    while (1) {
-        if (::FindNextFile(dhandle, &fdata)) {
-            results.push_back(std::wstring(fdata.cFileName));
-        }
-        else {
-            if (GetLastError() == ERROR_NO_MORE_FILES) {
-                break;
-            }
-            else {
-                FindClose(dhandle);
-                return results;
-            }
-        }
-    }
-
-    FindClose(dhandle);
-    return results;
-}
-
-int cFiryPluginData::ImportPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
-
-    std::wstring FinalLocalPath = pPath;
-    if (FinalLocalPath[FinalLocalPath.size() - 1] != L'\\')
-        FinalLocalPath += L"\\";
-
-    auto Depth = tokenize(pPath, L"\\/");
-    std::wstring DirName = Depth.empty() ? pPath : Depth.back();
-
-    firy::spImage image;
-    std::string inner;
-    if (!ResolveImage(pFile, image, inner) || !image)
-        return 1; // can't create a folder directly on the partition-list level
-
-    auto parentDir = image->filesystemPath(inner);
-    if (!parentDir)
-        return 1;
-
-    auto newDir = image->filesystemDirectoryCreate(ws2s(DirName));
-    if (!newDir)
-        // Filesystem doesn't support sub-directories (eg. a flat C64 disk)
-        return 1;
-
-    if (!parentDir->add(newDir))
-        return 1;
-
-    std::wstring FinalVfsPath = pFile;
-    if (FinalVfsPath[FinalVfsPath.size() - 1] != L'\\')
-        FinalVfsPath += L"\\";
-    FinalVfsPath += DirName;
-
-    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, true, OPUSFILECHANGE_MAKEDIR, FinalVfsPath.c_str());
-
-    auto contents = directoryList(FinalLocalPath + L"*.*");
-
-    for (auto& File : contents) {
-        if (File == L"." || File == L"..")
-            continue;
-
-        Import(lpBatchData, FinalVfsPath, FinalLocalPath + File);
-    }
-
-    return 0;
-}
-
-int cFiryPluginData::Import(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath) {
-
-    if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
-        return 1;
-
-    auto Attribs = GetFileAttributes(pPath.c_str());
-    if (Attribs == INVALID_FILE_ATTRIBUTES)
-        return 1;
-
-    if (Attribs & FILE_ATTRIBUTE_DIRECTORY)
-        return ImportPath(lpBatchData, pFile, pPath);
-
-    return ImportFile(lpBatchData, pFile, pPath);
-}
-
 int cFiryPluginData::ExtractFile(LPVFSBATCHDATAW lpBatchData, const firy::spNode& pEntry, const std::wstring& pDest) {
 
     auto file = std::dynamic_pointer_cast<firy::filesystem::sFile>(pEntry);
@@ -757,17 +681,21 @@ int cFiryPluginData::ExtractFile(LPVFSBATCHDATAW lpBatchData, const firy::spNode
     if (!content)
         return 2;
 
-    if (!firy::gResources->FileSave(ws2s(pDest), content))
+    if (!WriteHostFile(pDest, content))
         return 2;
 
     DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STEPBYTES, (DWORD_PTR)content->size());
 
-    HANDLE hDst = CreateFile(pDest.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     auto ft = GetFileTime(pEntry->timeWriteGet());
-    SetFileTime(hDst, 0, 0, &ft);
-    CloseHandle(hDst);
+    if (ft.dwLowDateTime || ft.dwHighDateTime) {
+        HANDLE hDst = CreateFileW(pDest.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hDst != INVALID_HANDLE_VALUE) {
+            SetFileTime(hDst, 0, 0, &ft);
+            CloseHandle(hDst);
+        }
+    }
 
-    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, lpBatchData->pszDestPath);
+    DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, pDest.c_str());
     return 0;
 }
 
@@ -778,17 +706,23 @@ int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring
     if (!ResolveImage(pPath, image, inner))
         return 1;
 
+    // A file that can't be copied (eg. an Amiga "AUX" - a reserved device name
+    // on Windows) doesn't stop the rest of the folder; the first error is
+    // reported at the end. Only an abort by the user stops early.
     int result = 0;
+    auto extractChild = [&](const std::wstring& pName) {
+        int childResult = Extract(lpBatchData, PathJoin(pPath, pName), pDest);
+        if (childResult && !result)
+            result = childResult;
+        return childResult != ERROR_CANCELLED;
+    };
 
     if (!image) {
         // Extracting the .hdf root: recurse into each partition.
-        for (auto& part : mPartitions) {
-            std::wstring ChildPath = pPath;
-            if (ChildPath[ChildPath.size() - 1] != L'\\')
-                ChildPath += L"\\";
-            ChildPath += s2ws(part.mName);
-
-            result |= Extract(lpBatchData, ChildPath, pDest);
+        auto partitions = mPartitions;
+        for (auto& part : partitions) {
+            if (!extractChild(s2ws(part.mName)))
+                break;
         }
         return result;
     }
@@ -797,24 +731,21 @@ int cFiryPluginData::ExtractPath(LPVFSBATCHDATAW lpBatchData, const std::wstring
     if (!dir)
         return 1;
 
-    for (auto& node : dir->mNodes) {
-
-        std::wstring ChildPath = pPath;
-        if (ChildPath[ChildPath.size() - 1] != L'\\')
-            ChildPath += L"\\";
-        ChildPath += s2ws(node->nameGet());
-
-        result |= Extract(lpBatchData, ChildPath, pDest);
+    // Copy the list: extracting may reload the image and with it the directory
+    auto nodes = dir->mNodes;
+    for (auto& node : nodes) {
+        if (!extractChild(s2ws(node->nameGet())))
+            break;
     }
 
     return result;
 }
 
 int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pDest) {
-    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)"Copying");
+    DOpus.UpdateFunctionProgressBar(lpBatchData->lpFuncData, PROGRESSACTION_STATUSTEXT, (DWORD_PTR)L"Copying");
 
     if (lpBatchData->hAbortEvent && WaitForSingleObject(lpBatchData->hAbortEvent, 0) == WAIT_OBJECT_0)
-        return 1;
+        return ERROR_CANCELLED;
 
     firy::spImage image;
     std::string inner;
@@ -823,11 +754,7 @@ int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pF
 
     auto Depth = tokenize(pFile, L"\\/");
     std::wstring ItemName = Depth.empty() ? pFile : Depth.back();
-
-    std::wstring FinalName = pDest;
-    if (FinalName[FinalName.size() - 1] != '\\')
-        FinalName += '\\';
-    FinalName += ItemName;
+    std::wstring FinalName = PathJoin(pDest, ItemName);
 
     if (!image) {
         // A partition, presented as a folder - recurse the same way a
@@ -847,15 +774,19 @@ int cFiryPluginData::Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pF
 
     int result;
     if (node->isDirectory()) {
-        CreateDirectory(FinalName.c_str(), 0);
-        result = ExtractPath(lpBatchData, pFile, FinalName);
-        DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_CREATE, lpBatchData->pszDestPath);
+        if (!CreateDirectory(FinalName.c_str(), 0) && GetLastError() != ERROR_ALREADY_EXISTS)
+            return 2;
+        DOpus.AddFunctionFileChange(lpBatchData->lpFuncData, false, OPUSFILECHANGE_MAKEDIR, FinalName.c_str());
 
-        if (!result) {
+        result = ExtractPath(lpBatchData, pFile, FinalName);
+
+        auto ft = GetFileTime(node->timeWriteGet());
+        if (!result && (ft.dwLowDateTime || ft.dwHighDateTime)) {
             HANDLE hDst = CreateFile(FinalName.c_str(), FILE_WRITE_ATTRIBUTES, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-            auto ft = GetFileTime(node->timeWriteGet());
-            SetFileTime(hDst, 0, 0, &ft);
-            CloseHandle(hDst);
+            if (hDst != INVALID_HANDLE_VALUE) {
+                SetFileTime(hDst, 0, 0, &ft);
+                CloseHandle(hDst);
+            }
         }
     }
     else {
@@ -878,7 +809,8 @@ size_t cFiryPluginData::TotalFreeBlocks(const std::wstring& pFile) {
 
     // .hdf root: sum free space across every partition.
     size_t free = 0;
-    for (auto& part : mPartitions) {
+    auto partitions = mPartitions;
+    for (auto& part : partitions) {
         if (OpenPartition(part.mName))
             free += mPartitionImage->filesystemTotalBytesFree();
     }
@@ -914,12 +846,9 @@ UINT cFiryPluginData::BatchOperation(LPTSTR lpszPath, LPVFSBATCHDATAW lpBatchDat
             lpBatchData->piResults[i] = Extract(lpBatchData, File, lpBatchData->pszDestPath);
         }
 
-        if (lpBatchData->uiOperation == VFSBATCHOP_ADD) {
-            lpBatchData->piResults[i] = Import(lpBatchData, lpszPath, File);
-        }
-
-        if (lpBatchData->uiOperation == VFSBATCHOP_DELETE) {
-            lpBatchData->piResults[i] = Delete(lpBatchData, lpszPath, File);
+        // Read-only: writing into images is disabled until it's reliable
+        if (lpBatchData->uiOperation == VFSBATCHOP_ADD || lpBatchData->uiOperation == VFSBATCHOP_DELETE) {
+            lpBatchData->piResults[i] = ERROR_WRITE_PROTECT;
         }
 
         if (lpBatchData->piResults[i]) {
@@ -945,8 +874,8 @@ bool cFiryPluginData::PropGet(vfsProperty propId, LPVOID lpPropData, LPVOID lpDa
     if (propId == VFSPROP_FUNCAVAILABILITY) {
         unsigned __int64* Data = (unsigned __int64*)lpPropData;
 
-        // Rename/SetAttr/Clipboard aren't implemented; Delete and MakeDir are.
-        *Data &= ~(VFSFUNCAVAIL_RENAME | VFSFUNCAVAIL_SETATTR | VFSFUNCAVAIL_CLIPCUT | VFSFUNCAVAIL_CLIPPASTE | VFSFUNCAVAIL_CLIPPASTESHORTCUT | VFSFUNCAVAIL_DUPLICATE);
+        // Read-only: nothing that changes the image
+        *Data &= ~(VFSFUNCAVAIL_MOVE | VFSFUNCAVAIL_DELETE | VFSFUNCAVAIL_MAKEDIR | VFSFUNCAVAIL_RENAME | VFSFUNCAVAIL_SETATTR | VFSFUNCAVAIL_CLIPCUT | VFSFUNCAVAIL_CLIPPASTE | VFSFUNCAVAIL_CLIPPASTESHORTCUT | VFSFUNCAVAIL_DUPLICATE | VFSFUNCAVAIL_SETTIME | VFSFUNCAVAIL_SETCOMMENT);
         return true;
     }
 

@@ -1,6 +1,6 @@
 # diropus-amiga-c64-disc-image-plugin
 
-**Status: v0.1.0 (beta 4)**
+**Status: v0.1.0 (beta 5)** - read-only for now, see below
 
 VFS plugin for Directory Opus that browses disk images directly in the
 Lister: Amiga (ADF/FDI/HDF/DMS), Commodore 64 (D64/D71/D81), FAT12/16/32 and
@@ -9,8 +9,8 @@ does the actual image parsing.
 
 ## Features
 
-* Browse, read, delete and import files/folders inside disk images, same as
-  a real folder in the Lister
+* Browse files and folders inside disk images and copy them out, same as a
+  real folder in the Lister
 * Amiga: `.adf` / `.fdi` / `.hdf` (including RDB-partitioned hard disk
   images, multiple partitions shown as folders) and `.dms` archives
 * Commodore 64: `.d64` / `.d71` / `.d81`
@@ -71,7 +71,11 @@ or refresh plugins.
 
 ## Known limitations (beta)
 
+* **Read-only:** copying into images, deleting and creating folders are
+  disabled. Up to beta 4 these only changed an in-memory copy and were never
+  written to the image file, and some of them could crash Opus. Working write
+  support is being finished on the `dev/write-support` branch.
 * Encrypted DMS archives aren't supported
-* No UI for creating a partitioned .hdf or an RDB from scratch (read/import/
-  delete into existing partitions works)
-* Rename and SetAttr aren't implemented
+* Files whose Amiga/C64 name is a reserved device name on Windows (`AUX`,
+  `CON`, `PRN`, `NUL`, `COM1`, ...) can't be copied out; the rest of the
+  folder still is, and the copy reports an error at the end

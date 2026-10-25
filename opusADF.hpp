@@ -16,7 +16,7 @@ public:
     firy::spDirectory mDirectory;
     bool mIsPartitionLevel = false;
     size_t mIndex = 0;
-    std::regex mFindMask;
+    std::wregex mFindMask;
 };
 
 class cFiryPluginData {
@@ -26,6 +26,7 @@ class cFiryPluginData {
     firy::spImage mImage;
     std::wstring mImagePath;
     size_t mLastError;
+
 
     // RDB-partitioned .hdf support: LoadFile() populates mPartitions when
     // an RDB is found. Until a specific partition name is navigated into,
@@ -59,7 +60,8 @@ protected:
     bool ResolveImage(const std::wstring& pPath, firy::spImage& pOutImage, std::string& pOutInner);
 
     std::wstring GetInnerPath(const std::wstring& pPath);
-    std::string InnerPathUtf8(const std::wstring& pPath);
+
+    void Invalidate();
 
 public:
     cFiryPluginData();
@@ -74,15 +76,9 @@ public:
     size_t TotalFreeBlocks(const std::wstring& pFile);
     size_t TotalDiskBlocks(const std::wstring& pFile);
 
-    int Delete(LPVFSBATCHDATAW lpBatchData, const std::wstring& pPath, const std::wstring& pFile);
-
     cFiryFindData* FindFirstFile(LPTSTR lpszPath, LPWIN32_FIND_DATA lpwfdData, HANDLE hAbortEvent);
     bool FindNextFile(cFiryFindData* pFindData, LPWIN32_FIND_DATA lpwfdData);
     void FindClose(cFiryFindData* pFindData);
-
-    int Import(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath);
-    int ImportFile(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath);
-    int ImportPath(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pPath);
 
     int Extract(LPVFSBATCHDATAW lpBatchData, const std::wstring& pFile, const std::wstring& pDest);
     int ExtractFile(LPVFSBATCHDATAW lpBatchData, const firy::spNode& pEntry, const std::wstring& pDest);
